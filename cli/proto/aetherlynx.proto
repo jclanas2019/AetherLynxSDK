@@ -1,1 +1,19 @@
+syntax = "proto3";
 
+package aetherlynx;
+
+service AetherLynx {
+    rpc CreateAgent(AgentCreateRequest) returns (AgentCreateResponse);
+    rpc StartOrchestrator(OrchestratorStartRequest) returns (OrchestratorStartResponse);
+}
+
+message AgentCreateRequest {
+    string name = 1;
+    string model = 2;
+}
+
+message AgentCreateResponse {}
+
+message OrchestratorStartRequest {}
+
+message OrchestratorStartResponse {}
