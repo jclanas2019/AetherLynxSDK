@@ -26,6 +26,7 @@ AetherLynx SDK es un kit de desarrollo de software diseñado para orquestar y ge
 ```bash
 git clone https://github.com/your_username/aetherlynxsdk.git
 cd aetherlynxsdk
+```
 
 ### Paso 2: Compilar el orquestador en Rust
 
