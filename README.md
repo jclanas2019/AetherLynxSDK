@@ -33,11 +33,13 @@ cd aetherlynxsdk
 ```bash
 cd agent_system
 cargo build --release
+```
 
 ### Paso 3: Ejecutar el orquestador
 
 ```bash
 ./target/release/aetherlynx-orchestrator
+```
 
 ### Paso 4: Ejecutar los Agentes (Python)
 
@@ -45,24 +47,26 @@ cargo build --release
 cd agents
 pip install -r requirements.txt
 python3 student_queries_agent.py
+```
 
-Uso
+## Uso
 ### Crear un Agente LLM
 
 ```bash
 aetherlynx-cli agent create --name "student-agent" --model "gpt-4"
+```
 
-Escalar un Agente
+### Escalar un Agente
 
 ```bash
 aetherlynx-cli agent scale --name "student-agent" --replicas 5
-
+```
 
 ### Monitorear el Estado del Sistema
 
 ```bash
 aetherlynx-cli orchestrator status
-
+```
 
 ###  Arquitectura
 La arquitectura de AetherLynx SDK sigue un enfoque de microservicios donde cada componente es gestionado de forma independiente, asegurando alta disponibilidad y fácil escalabilidad. Utiliza gRPC para la comunicación entre los diferentes servicios y agentes LLM, permitiendo interacciones rápidas y seguras.
