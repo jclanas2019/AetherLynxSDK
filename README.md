@@ -24,5 +24,54 @@ AetherLynx SDK es un kit de desarrollo de software diseñado para orquestar y ge
 ### Paso 1: Clonar el repositorio
 
 ```bash
-git clone https://github.com/your_username/aetherlynx-sdk.git
-cd aetherlynx-sdk
+git clone https://github.com/your_username/aetherlynxsdk.git
+cd aetherlynxsdk
+
+### Paso 2: Compilar el orquestador en Rust
+
+```bash
+cd agent_system
+cargo build --release
+
+### Paso 3: Ejecutar el orquestador
+
+```bash
+./target/release/aetherlynx-orchestrator
+
+### Paso 4: Ejecutar los Agentes (Python)
+
+```bash
+cd agents
+pip install -r requirements.txt
+python3 student_queries_agent.py
+
+Uso
+### Crear un Agente LLM
+
+```bash
+aetherlynx-cli agent create --name "student-agent" --model "gpt-4"
+
+Escalar un Agente
+
+```bash
+aetherlynx-cli agent scale --name "student-agent" --replicas 5
+
+
+### Monitorear el Estado del Sistema
+
+```bash
+aetherlynx-cli orchestrator status
+
+
+###  Arquitectura
+La arquitectura de AetherLynx SDK sigue un enfoque de microservicios donde cada componente es gestionado de forma independiente, asegurando alta disponibilidad y fácil escalabilidad. Utiliza gRPC para la comunicación entre los diferentes servicios y agentes LLM, permitiendo interacciones rápidas y seguras.
+
+###  Contribuir
+Si deseas contribuir a este proyecto, por favor realiza un fork del repositorio y envía un pull request con tus cambios.
+
+### Licencia
+AetherLynx SDK está disponible bajo la licencia MIT. Ver el archivo LICENSE para más detalles.
+
+
+
+
