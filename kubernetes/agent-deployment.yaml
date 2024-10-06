@@ -1,1 +1,19 @@
-
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: university-agent-deployment
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: university-agent
+  template:
+    metadata:
+      labels:
+        app: university-agent
+    spec:
+      containers:
+      - name: university-agent
+        image: university-agent:latest
+        ports:
+        - containerPort: 5000
