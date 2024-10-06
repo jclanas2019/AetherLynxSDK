@@ -1,6 +1,6 @@
 # AetherLynx SDK
 
-![AetherLynx SDK Logo](.AetherLynxLogo.png)
+![AetherLynx SDK Logo](AetherLynxLogo.png)
 
 AetherLynx SDK es un kit de desarrollo de software diseñado para orquestar y gestionar agentes de modelos de lenguaje a gran escala (LLM) con un enfoque en alta escalabilidad, resiliencia y flexibilidad. Este SDK se inspira en la arquitectura de Kubernetes, pero está adaptado para ser extremadamente eficiente en la gestión de agentes de IA y operaciones de inferencia en entornos distribuidos.
 
