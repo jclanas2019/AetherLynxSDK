@@ -2,6 +2,7 @@
 # AetherLynx SDK - PAM/PIM
 
 Este proyecto forma parte del subproyecto **AetherLynx SDK** y proporciona funcionalidades de autenticación y gestión de usuarios mediante módulos de PAM/PIM. Está diseñado para sistemas que necesitan una arquitectura desacoplada y segura para manejar usuarios y permisos, utilizando componentes en **Rust** y **Python**.
+![Aether LynxPAMPIM](Aether LynxPAMPIM.png)
 
 ## Estructura del Proyecto
 
