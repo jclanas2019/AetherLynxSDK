@@ -1,0 +1,35 @@
+[package]
+name = "pam_ipa_project"
+version = "0.1.0"
+edition = "2018"
+description = "A PAM and IPA integration project with Python bindings using Rust"
+homepage = "https://your-project-homepage.com"
+repository = "https://github.com/your-username/pam_ipa_project"
+documentation = "https://your-project-documentation.com"
+license = "MIT"
+authors = ["Juan Carlos Lanas <jc@lab-org.cl>"]
+keywords = ["PAM", "IPA", "Rust", "Python"]
+categories = ["security", "authentication", "bindings"]
+
+# Dependencias necesarias
+[dependencies]
+pyo3 = { version = "0.18", features = ["extension-module"] }
+argon2 = "0.4"
+rand = "0.8"
+base32 = "0.4"
+hmac-sha256 = "1.0"
+rusqlite = { version = "0.27", features = ["bundled"] }
+password-hash = "0.4"
+jsonwebtoken = "8.1"
+chrono = "0.4"
+serde = { version = "1.0", features = ["derive"] }  # Asegúrate de incluir esta línea
+config = "0.11"
+
+
+# Tipo de crate: debe ser cdylib para generar un archivo compatible con Python (en Windows, un .pyd)
+[lib]
+crate-type = ["cdylib"]  # Esto indica que debe generarse una librería compartida (dynamic library)
+
+[package.metadata]
+summary = "Integration of PAM and IPA with Rust bindings for Python"
+authors = ["Juan Carlos Lanas <jc@lab-org.cl>"]
