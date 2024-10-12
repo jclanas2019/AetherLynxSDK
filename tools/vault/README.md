@@ -2,6 +2,8 @@
 # AetherLynx SDK - Vault
 
 Este subproyecto del **AetherLynx SDK** proporciona un **Vault** seguro para gestionar información sensible utilizando una combinación de **Rust** y **Python**. Está diseñado para proporcionar almacenamiento seguro con acceso controlado, asegurando confidencialidad y fácil integración con otros módulos.
+![AetherLynxVault](/tools/vault/AetherLynxVault.png)
+
 
 ## Estructura del Proyecto
 
