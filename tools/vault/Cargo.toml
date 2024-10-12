@@ -1,0 +1,19 @@
+[package]
+name = "rust_vault"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "rust_vault"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.18", features = ["extension-module"] }
+ring = "0.16"
+rcgen = "0.10"
+base64 = "0.13"
+chrono = "0.4"
+rusqlite = { version = "0.28", features = ["bundled"] }
+
+[build-dependencies]
+pyo3-build-config = "0.18"
