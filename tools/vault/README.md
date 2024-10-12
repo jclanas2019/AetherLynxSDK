@@ -1,29 +1,23 @@
 
-# AetherLynx SDK - PAM/PIM
+# AetherLynx SDK - Vault
 
-Este proyecto forma parte del subproyecto **AetherLynx SDK** y proporciona funcionalidades de autenticación y gestión de usuarios mediante módulos de PAM/PIM. Está diseñado para sistemas que necesitan una arquitectura desacoplada y segura para manejar usuarios y permisos, utilizando componentes en **Rust** y **Python**.
+Este subproyecto del **AetherLynx SDK** proporciona un **Vault** seguro para gestionar información sensible utilizando una combinación de **Rust** y **Python**. Está diseñado para proporcionar almacenamiento seguro con acceso controlado, asegurando confidencialidad y fácil integración con otros módulos.
 
 ## Estructura del Proyecto
 
 ### Archivos de Código
 
-- **`audit.rs`**: Implementa los módulos de auditoría para capturar y registrar eventos críticos del sistema.
-- **`auth.rs`**: Proporciona las funciones de autenticación utilizando clave y token con expiración.
-- **`db.rs`**: Gestiona la conexión con la base de datos SQLite, evitando duplicación de código en la inserción de usuarios.
-- **`ipa.rs`**: Ofrece integración con servicios IPA para la gestión de identidades.
-- **`pam.rs`**: Implementa la interacción con módulos PAM para autenticación.
-- **`lib.rs`**: Contiene las configuraciones principales y funciones compartidas entre módulos.
-- **`app.py`**: Aplicación en Python que proporciona una API utilizando **FastAPI**.
-- **`cliente.py`**: Cliente que interactúa con la API de FastAPI para probar la funcionalidad del sistema.
-- **`Cargo.toml`**: Define las dependencias de Rust y la configuración del proyecto.
-- **`config.toml`**: Archivo de configuración del sistema.
+- **`lib.rs`**: Define la lógica principal del vault en Rust, incluyendo el manejo de la encriptación y control de acceso.
+- **`main.py`**: Aplicación Python que interactúa con el vault utilizando bindings de Rust y proporciona una API básica.
+- **`my_vault.db`**: Base de datos SQLite que almacena los datos sensibles.
+- **`Cargo.toml`**: Define las dependencias de Rust y las configuraciones necesarias para el proyecto.
 
 ## Requisitos
 
 - **Python 3.11** o superior
 - **Rust** y **Cargo** instalados
 - **Maturin**: Para compilar los módulos Rust y enlazarlos con Python
-- **FastAPI** y **Uvicorn**: Para ejecutar la API web
+- **Uvicorn**: Para ejecutar la API con FastAPI
 
 ### Instalación de Maturin
 ```bash
@@ -32,39 +26,39 @@ pip install maturin
 
 ## Configuración del Proyecto
 
-1. Asegúrate de que tienes todas las dependencias definidas en `Cargo.toml`.
-2. Configura el archivo `config.toml` según los parámetros de tu entorno.
-3. Verifica que no haya duplicación de lógica en la inserción de usuarios en los módulos `db.rs` y `app.py`.
+1. Verifica las dependencias en el archivo `Cargo.toml`.
+2. Asegúrate de tener el archivo de base de datos `my_vault.db` en el directorio adecuado.
+3. Realiza las configuraciones necesarias en `lib.rs` si necesitas ajustes adicionales en la lógica del vault.
 
 ## Compilación y Desarrollo
 
-Para compilar los módulos en desarrollo, usa el siguiente comando:
+Para compilar y desarrollar el proyecto, usa el siguiente comando:
 
 ```bash
 maturin develop
 ```
 
-Este comando compilará el código Rust e instalará los módulos como extensiones de Python, permitiendo la interacción directa.
+Este comando compilará el código Rust e instalará los módulos como extensiones de Python para permitir su uso inmediato.
 
 ## Ejecución de la API
 
-Una vez que los módulos estén compilados y disponibles, puedes iniciar la API:
+Después de compilar los módulos, ejecuta la API de la siguiente manera:
 
 ```bash
-uvicorn app:app --reload
+uvicorn main:app --reload
 ```
 
-Esto iniciará el servidor en `http://127.0.0.1:8000`.
+La API estará disponible en: `http://127.0.0.1:8000`.
 
 ## Pruebas del Sistema
 
-Puedes utilizar el cliente Python proporcionado en `cliente.py` para probar la API.
+1. Asegúrate de que los datos sensibles se almacenen y recuperen correctamente desde `my_vault.db`.
+2. Prueba las funcionalidades del vault mediante solicitudes a la API utilizando herramientas como `Postman` o `curl`.
 
+Ejemplo de prueba rápida:
 ```bash
-python cliente.py
+python main.py
 ```
-
-Asegúrate de que todas las funcionalidades de autenticación y gestión de usuarios funcionan correctamente.
 
 ## Contribuciones
 
