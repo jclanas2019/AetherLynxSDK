@@ -74,6 +74,9 @@ La arquitectura de AetherLynx SDK sigue un enfoque de microservicios donde cada 
 ###  Contribuir
 Si deseas contribuir a este proyecto, por favor realiza un fork del repositorio y envía un pull request con tus cambios.
 
+Juan Carlos Lanas Ocampo
+jc@lab-ai.org
+
 ### Licencia
 AetherLynx SDK está disponible bajo la licencia MIT. Ver el archivo LICENSE para más detalles.
 
