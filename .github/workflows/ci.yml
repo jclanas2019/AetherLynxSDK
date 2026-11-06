@@ -43,7 +43,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: cargo fmt -- --check
@@ -64,7 +64,7 @@ jobs:
         working-directory: agents
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt pytest httpx
@@ -84,7 +84,7 @@ jobs:
         working-directory: tools/vault
       - run: cargo audit --deny warnings
         working-directory: tools/pam_ipa_project
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - run: pip install pip-audit
