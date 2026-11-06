@@ -1,5 +1,5 @@
 # Rangos acotados: actualizaciones de parche sí, cambios de versión mayor no.
-openai>=1.40,<2
+openai>=3.42.1,<4
 requests>=2.32,<3
 fastapi>=0.110,<1
 uvicorn[standard]>=0.29,<1
