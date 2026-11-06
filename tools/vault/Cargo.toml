@@ -19,7 +19,7 @@ argon2 = { version = "0.5", features = ["std"] }
 rcgen = "0.13"
 time = "0.3"
 base64 = "0.22"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 zeroize = "1.8"
 
 [dev-dependencies]
