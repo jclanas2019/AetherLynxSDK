@@ -1,0 +1,16 @@
+[build-system]
+requires = ["maturin>=1.5,<2"]
+build-backend = "maturin"
+
+[project]
+name = "rust_vault"
+version = "0.2.0"
+description = "Vault de secretos de AetherLynx"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+
+[tool.maturin]
+features = ["extension-module"]

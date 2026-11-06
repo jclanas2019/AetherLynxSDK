@@ -1,0 +1,4 @@
+# Dependencias de app.py (la API). El módulo Rust se instala desde su wheel.
+fastapi>=0.110,<1
+uvicorn[standard]>=0.29,<1
+pydantic>=2.6,<3

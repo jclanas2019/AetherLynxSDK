@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# Las Actions están fijadas por etiqueta. Para fijarlas por SHA (recomendado),
+# sustituya cada `@vN` por el commit correspondiente; Dependabot
+# (.github/dependabot.yml) mantiene ambas formas al día.
+
+jobs:
+  rust:
+    name: Orquestador y CLI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # Compilar y probar en debug detecta las aserciones de clap que el
+      # modo release ocultaba.
+      - run: cargo test --workspace --locked
+
+  python-tools:
+    name: Módulos Python (${{ matrix.tool }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        tool: [vault, pam_ipa_project]
+    defaults:
+      run:
+        working-directory: tools/${{ matrix.tool }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: cargo fmt -- --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+      - run: pip install maturin pytest httpx
+      - if: matrix.tool == 'pam_ipa_project'
+        run: pip install -r requirements-api.txt
+      - run: maturin build --release --locked
+      - run: pip install target/wheels/*.whl
+      - run: pytest -q tests
+
+  agent:
+    name: Agente de consultas
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: agents
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt pytest httpx
+      - run: pytest -q tests
+
+  audit:
+    name: Auditoría de dependencias
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install cargo-audit --locked
+      # Los tres lockfiles: el del workspace y los de los módulos Python
+      # (donde viven pyo3 y sus avisos de seguridad).
+      - run: cargo audit --deny warnings
+      - run: cargo audit --deny warnings
+        working-directory: tools/vault
+      - run: cargo audit --deny warnings
+        working-directory: tools/pam_ipa_project
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pip-audit
+      - run: pip-audit -r agents/requirements.txt
+      - run: pip-audit -r tools/pam_ipa_project/requirements-api.txt

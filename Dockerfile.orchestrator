@@ -1,0 +1,22 @@
+# Imagen del orquestador y la CLI.
+#   docker build -f Dockerfile.orchestrator -t <registro>/aetherlynx/orchestrator:0.2.0 .
+FROM rust:1.88-slim-bookworm AS build
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends protobuf-compiler \
+ && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY proto proto
+COPY agent_system agent_system
+COPY cli cli
+RUN cargo build --release --locked -p aetherlynx-orchestrator -p aetherlynx-cli
+
+FROM gcr.io/distroless/cc-debian12:nonroot
+COPY --from=build /src/target/release/aetherlynx-orchestrator /usr/local/bin/
+COPY --from=build /src/target/release/aetherlynx-cli /usr/local/bin/
+USER nonroot
+EXPOSE 50051
+# Dentro de un clúster: escuche en 0.0.0.0 con --tls-cert/--tls-key, o con
+# --allow-insecure-transport si un service mesh ya cifra el tráfico (mTLS).
+ENTRYPOINT ["/usr/local/bin/aetherlynx-orchestrator", "start"]
+CMD ["--listen", "0.0.0.0:50051", "--log-format", "json"]

@@ -1,101 +1,369 @@
-from fastapi import FastAPI, HTTPException, Body
-from pydantic import BaseModel
-from pam_ipa_project import PyAuthManager, PyIPA
+"""API de autenticación y autorización de AetherLynx.
 
-app = FastAPI()
+Configuración por variables de entorno:
 
-# Inicialización de PyAuthManager y PyIPA
-auth_manager = PyAuthManager()
-ipa_manager = PyIPA()
+  AETHERLYNX_JWT_SECRET            obligatorio, >= 32 bytes aleatorios
+  AETHERLYNX_DB_PATH               ruta SQLite (por defecto: pam_ipa.db)
+  AETHERLYNX_TOKEN_TTL_SECONDS     vigencia del token (por defecto: 600)
+  AETHERLYNX_ALLOW_SELF_REGISTRATION  "true" para permitir /register público (por defecto: true)
+  AETHERLYNX_DEFAULT_ROLE          rol que recibe un usuario auto-registrado (por defecto: user)
+  AETHERLYNX_BOOTSTRAP_ADMIN_USER / AETHERLYNX_BOOTSTRAP_ADMIN_PASSWORD
+                                   crean el primer administrador al arrancar, si no existe
+  AETHERLYNX_RATE_LIMIT_PER_MINUTE peticiones por IP y minuto a /authenticate y /register (30)
 
-# Modelo para la solicitud de registro de usuario
+Detrás de un proxy inverso, arranque uvicorn con --proxy-headers y
+--forwarded-allow-ips para que el límite por IP vea la IP real del cliente.
+
+Ejecutar:  uvicorn app:app
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import threading
+import time
+from collections import defaultdict, deque
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from typing import Annotated
+
+from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi.responses import JSONResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pydantic import BaseModel, Field
+
+import pam_ipa_project as pamlib
+from pam_ipa_project import PyAudit, PyAuthManager, PyIPA
+
+log = logging.getLogger("aetherlynx.auth")
+
+ADMIN_ROLE = "admin"
+
+
+# --------------------------------------------------------------------------
+# Configuración y estado
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class Settings:
+    jwt_secret: str
+    db_path: str
+    token_ttl: int
+    allow_self_registration: bool
+    default_role: str
+    bootstrap_user: str | None
+    bootstrap_password: str | None
+    rate_limit_per_minute: int
+
+    @classmethod
+    def from_env(cls) -> "Settings":
+        secret = os.environ.get("AETHERLYNX_JWT_SECRET", "")
+        if len(secret.encode()) < 32:
+            raise RuntimeError(
+                "AETHERLYNX_JWT_SECRET no está definido o tiene menos de 32 bytes. "
+                "Genere uno con: python -c 'import secrets; print(secrets.token_urlsafe(48))'"
+            )
+        return cls(
+            jwt_secret=secret,
+            db_path=os.environ.get("AETHERLYNX_DB_PATH", "pam_ipa.db"),
+            token_ttl=int(os.environ.get("AETHERLYNX_TOKEN_TTL_SECONDS", "600")),
+            allow_self_registration=os.environ.get("AETHERLYNX_ALLOW_SELF_REGISTRATION", "true").lower()
+            in ("1", "true", "yes"),
+            default_role=os.environ.get("AETHERLYNX_DEFAULT_ROLE", "user"),
+            bootstrap_user=os.environ.get("AETHERLYNX_BOOTSTRAP_ADMIN_USER") or None,
+            bootstrap_password=os.environ.get("AETHERLYNX_BOOTSTRAP_ADMIN_PASSWORD") or None,
+            rate_limit_per_minute=int(os.environ.get("AETHERLYNX_RATE_LIMIT_PER_MINUTE", "30")),
+        )
+
+
+class RateLimiter:
+    """Ventana deslizante en memoria por (IP, ruta). Basta para un proceso;
+    con varias réplicas, póngalo además en el ingress o el API gateway."""
+
+    def __init__(self, per_minute: int) -> None:
+        self.limit = per_minute
+        self.hits: dict[tuple[str, str], deque] = defaultdict(deque)
+        self.lock = threading.Lock()
+
+    def allow(self, key: tuple[str, str]) -> bool:
+        if self.limit <= 0:
+            return True
+        now = time.monotonic()
+        with self.lock:
+            q = self.hits[key]
+            while q and now - q[0] > 60:
+                q.popleft()
+            if len(q) >= self.limit:
+                return False
+            q.append(now)
+            if len(self.hits) > 50_000:  # evita crecer sin límite
+                for k in [k for k, v in self.hits.items() if not v]:
+                    del self.hits[k]
+            return True
+
+
+class State:
+    settings: Settings
+    auth: PyAuthManager
+    ipa: PyIPA
+    audit: PyAudit
+    limiter: RateLimiter
+
+
+state = State()
+
+
+def _bootstrap_admin(s: Settings) -> None:
+    """Crea el primer administrador. Solo otorga el rol a la cuenta que crea
+    en este paso: si ya existe una cuenta con ese nombre, no la toca (podría
+    haberla registrado cualquiera) ni vuelve a darle admin en cada arranque."""
+    if not (s.bootstrap_user and s.bootstrap_password):
+        return
+    if state.auth.user_exists(s.bootstrap_user):
+        name = s.bootstrap_user.strip().lower()
+        if not state.ipa.has_role(name, ADMIN_ROLE):
+            log.warning(
+                "AETHERLYNX_BOOTSTRAP_ADMIN_USER='%s' ya existe sin rol admin; no se le otorga. "
+                "Asígnelo con otro administrador si corresponde.",
+                name,
+            )
+        return
+    name = state.auth.register_user(s.bootstrap_user, s.bootstrap_password)
+    state.ipa.add_role(name, ADMIN_ROLE)
+    log.warning("administrador inicial '%s' creado; cambie su contraseña", name)
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    s = Settings.from_env()
+    state.settings = s
+    state.auth = PyAuthManager(s.db_path, s.jwt_secret, token_ttl_seconds=s.token_ttl)
+    state.ipa = PyIPA(s.db_path)
+    state.audit = PyAudit(s.db_path)
+    state.limiter = RateLimiter(s.rate_limit_per_minute)
+    _bootstrap_admin(s)
+    yield
+
+
+app = FastAPI(title="AetherLynx Auth", version="0.2.0", lifespan=lifespan)
+
+
+# --------------------------------------------------------------------------
+# Errores: cada excepción del módulo Rust se traduce a un código HTTP concreto
+# --------------------------------------------------------------------------
+
+_ERRORS = {
+    pamlib.InvalidInputError: (422, None),
+    pamlib.UserExistsError: (status.HTTP_409_CONFLICT, "el usuario ya existe"),
+    pamlib.InvalidCredentialsError: (status.HTTP_401_UNAUTHORIZED, "credenciales inválidas"),
+    pamlib.InvalidTokenError: (status.HTTP_401_UNAUTHORIZED, "token inválido o expirado"),
+    pamlib.NotFoundError: (status.HTTP_404_NOT_FOUND, "no encontrado"),
+}
+
+
+@app.exception_handler(pamlib.AuthError)
+async def _auth_error_handler(_req: Request, exc: Exception) -> JSONResponse:
+    for cls, (code, msg) in _ERRORS.items():
+        if isinstance(exc, cls):
+            headers = {"WWW-Authenticate": "Bearer"} if code == 401 else None
+            return JSONResponse({"detail": msg or str(exc)}, status_code=code, headers=headers)
+    # Errores internos: se registran completos pero no se exponen al cliente.
+    log.exception("error interno de autenticación", exc_info=exc)
+    return JSONResponse({"detail": "error interno"}, status_code=500)
+
+
+# --------------------------------------------------------------------------
+# Dependencias de seguridad
+# --------------------------------------------------------------------------
+
+_bearer = HTTPBearer(auto_error=False)
+
+
+def current_user(
+    creds: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
+) -> str:
+    if creds is None or creds.scheme.lower() != "bearer":
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED, "falta el token de acceso", headers={"WWW-Authenticate": "Bearer"}
+        )
+    return state.auth.decode_token(creds.credentials)
+
+
+CurrentUser = Annotated[str, Depends(current_user)]
+
+
+def require_admin(user: CurrentUser) -> str:
+    if not state.ipa.has_role(user, ADMIN_ROLE):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "se requiere rol de administrador")
+    return user
+
+
+Admin = Annotated[str, Depends(require_admin)]
+
+
+def rate_limited(request: Request) -> None:
+    ip = request.client.host if request.client else "desconocida"
+    if not state.limiter.allow((ip, request.url.path)):
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS, "demasiadas peticiones; espere un minuto", headers={"Retry-After": "60"}
+        )
+
+
+RateLimited = Depends(rate_limited)
+
+
+def _self_or_admin(user: str, target: str) -> None:
+    if target.strip().lower() != user and not state.ipa.has_role(user, ADMIN_ROLE):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "solo puede consultar su propia cuenta")
+
+
+# --------------------------------------------------------------------------
+# Modelos
+# --------------------------------------------------------------------------
+
+Username = Annotated[str, Field(min_length=3, max_length=64)]
+Password = Annotated[str, Field(min_length=1, max_length=256)]
+Label = Annotated[str, Field(min_length=1, max_length=64)]
+
+
 class UserRegister(BaseModel):
-    username: str
-    password: str
-    role: str
+    username: Username
+    password: Password
 
-# Modelo para la autenticación de usuario
+
 class UserAuth(BaseModel):
-    username: str
-    password: str
-    resource: str
+    username: Username
+    password: Password
+    # Opcional: comprobar además el acceso a un recurso en el mismo paso.
+    resource: Label | None = None
 
-# Modelo para la asignación de roles
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int
+    resource: str | None = None
+
+
 class RoleAssign(BaseModel):
-    role: str
+    role: Label
 
-# Ruta para registrar un nuevo usuario
-@app.post("/register")
-async def register_user(user: UserRegister):
-    try:
-        # Registrar al usuario en PyAuthManager
-        auth_manager.register_user(user.username, user.password)
-        # Asignar rol al usuario en PyIPA
-        ipa_manager.add_role(user.username, user.role)
-        return {"message": "User registered successfully"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"User registration failed: {str(e)}")
 
-# Ruta para autenticar un usuario
-@app.post("/authenticate")
-async def authenticate_user(user: UserAuth):
-    try:
-        # Autenticar usando PyAuthManager
-        token = auth_manager.authenticate_user(user.username, user.password)
-        
-        # Verificar si el usuario tiene acceso al recurso
-        has_access = ipa_manager.has_access(user.username, user.resource)
-        if has_access:
-            return {"message": "Authenticated successfully", "token": token, "resource": user.resource}
-        else:
-            raise HTTPException(status_code=403, detail="Access denied to the resource")
-    except Exception as e:
-        raise HTTPException(status_code=401, detail=f"Authentication failed: {str(e)}")
+class ResourceCreate(BaseModel):
+    resource: Label
+    allowed_role: Label
 
-# Ruta para obtener información del usuario
+
+class TokenBody(BaseModel):
+    token: Annotated[str, Field(max_length=4096)]
+
+
+class PasswordChange(BaseModel):
+    old_password: Password
+    new_password: Password
+
+
+# --------------------------------------------------------------------------
+# Rutas
+# --------------------------------------------------------------------------
+
+
+@app.get("/healthz", include_in_schema=False)
+def healthz() -> dict:
+    return {"status": "ok"}
+
+
+@app.post("/register", status_code=status.HTTP_201_CREATED, dependencies=[RateLimited])
+def register_user(body: UserRegister) -> dict:
+    """Alta pública. El rol lo decide el servidor, nunca el cliente."""
+    if not state.settings.allow_self_registration:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "el auto-registro está desactivado")
+    name = state.auth.register_user(body.username, body.password)
+    state.ipa.add_role(name, state.settings.default_role)
+    return {"message": "usuario registrado", "username": name, "roles": [state.settings.default_role]}
+
+
+@app.post("/users", status_code=status.HTTP_201_CREATED)
+def create_user(body: UserRegister, _admin: Admin) -> dict:
+    """Alta por un administrador (sin rol; asígnelo con /assign-role)."""
+    name = state.auth.register_user(body.username, body.password)
+    return {"message": "usuario creado", "username": name}
+
+
+@app.post("/authenticate", response_model=TokenResponse, dependencies=[RateLimited])
+def authenticate_user(body: UserAuth) -> TokenResponse:
+    token = state.auth.authenticate_user(body.username, body.password)
+    if body.resource is not None:
+        user = body.username.strip().lower()
+        if not state.ipa.has_access(user, body.resource):
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "acceso denegado al recurso")
+    return TokenResponse(access_token=token, expires_in=state.auth.token_ttl_seconds, resource=body.resource)
+
+
+@app.get("/me")
+def me(user: CurrentUser) -> dict:
+    return {"username": user, "roles": state.ipa.get_roles(user)}
+
+
+@app.post("/me/password")
+def change_password(body: PasswordChange, user: CurrentUser) -> dict:
+    """Cambia la contraseña e invalida todos los tokens anteriores."""
+    state.auth.change_password(user, body.old_password, body.new_password)
+    return {"message": "contraseña actualizada; vuelva a iniciar sesión"}
+
+
+@app.post("/me/logout-all")
+def logout_all(user: CurrentUser) -> dict:
+    """Invalida todos los tokens de la cuenta, incluido el de esta petición."""
+    state.auth.revoke_tokens(user)
+    return {"message": "sesiones cerradas"}
+
+
 @app.get("/users/{username}")
-async def get_user(username: str):
-    try:
-        # Obtener los roles desde PyIPA
-        roles = ipa_manager.get_roles(username)
-        if roles is None:
-            raise HTTPException(status_code=404, detail="User not found")
-        return {"username": username, "roles": roles}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to retrieve user: {str(e)}")
+def get_user(username: str, user: CurrentUser) -> dict:
+    _self_or_admin(user, username)
+    if not state.auth.user_exists(username):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "usuario no encontrado")
+    return {"username": username.strip().lower(), "roles": state.ipa.get_roles(username)}
 
-# Ruta para asignar roles a un usuario
+
 @app.post("/assign-role/{username}")
-async def assign_role(username: str, role_assign: RoleAssign):
-    try:
-        ipa_manager.add_role(username, role_assign.role)
-        return {"message": "Role assigned successfully"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to assign role: {str(e)}")
+def assign_role(username: str, body: RoleAssign, _admin: Admin) -> dict:
+    state.ipa.add_role(username, body.role)
+    return {"message": "rol asignado"}
 
-# Ruta para verificar un token
-@app.post("/verify-token")
-async def verify_token(token: str = Body(...)):
-    try:
-        is_valid = auth_manager.verify_token(token)
-        return {"is_valid": is_valid}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Token verification failed: {str(e)}")
 
-# Ruta para agregar un recurso
-@app.post("/add-resource")
-async def add_resource(resource: str, allowed_role: str):
-    try:
-        ipa_manager.add_resource(resource, allowed_role)
-        return {"message": f"Resource {resource} added successfully for role {allowed_role}"}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to add resource: {str(e)}")
+@app.delete("/assign-role/{username}/{role}")
+def revoke_role(username: str, role: str, admin: Admin) -> dict:
+    if username.strip().lower() == admin and role.strip().lower() == ADMIN_ROLE:
+        raise HTTPException(status.HTTP_409_CONFLICT, "no puede quitarse a sí mismo el rol de administrador")
+    state.ipa.remove_role(username, role)
+    return {"message": "rol revocado"}
 
-# Ruta para listar recursos accesibles para un usuario
+
+@app.post("/add-resource", status_code=status.HTTP_201_CREATED)
+def add_resource(body: ResourceCreate, _admin: Admin) -> dict:
+    state.ipa.add_resource(body.resource, body.allowed_role)
+    return {"message": f"recurso '{body.resource}' disponible para el rol '{body.allowed_role}'"}
+
+
 @app.get("/accessible-resources/{username}")
-async def list_accessible_resources(username: str):
+def list_accessible_resources(username: str, user: CurrentUser) -> dict:
+    _self_or_admin(user, username)
+    return {"username": username.strip().lower(), "accessible_resources": state.ipa.list_accessible_resources(username)}
+
+
+@app.post("/verify-token")
+def verify_token(body: TokenBody) -> dict:
     try:
-        resources = ipa_manager.list_accessible_resources(username)
-        return {"username": username, "accessible_resources": resources}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to list accessible resources: {str(e)}")
+        sub = state.auth.decode_token(body.token)
+    except pamlib.InvalidTokenError:
+        return {"is_valid": False}
+    return {"is_valid": True, "sub": sub}
+
+
+@app.get("/audit")
+def audit_events(_admin: Admin, limit: int = 100) -> dict:
+    return {"events": state.audit.events(max(1, min(limit, 1000)))}

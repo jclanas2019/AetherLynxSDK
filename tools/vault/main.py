@@ -1,38 +1,44 @@
+"""Demostración del vault de AetherLynx.
+
+    export AETHERLYNX_VAULT_PASSPHRASE='una passphrase larga y única'
+    python main.py [ruta.db]
+
+La passphrase nunca se escribe en el código ni se guarda en la base de datos.
+"""
+
+import sys
+
 import rust_vault
 
-def main():
-    # Crear una nueva instancia del vault, especificando la ruta de la base de datos
-    vault = rust_vault.RustVault("my_vault.db")
 
-    # Agregar algunos secretos
+def mask(value: str) -> str:
+    return f"•••• ({len(value)} caracteres)"
+
+
+def main() -> None:
+    db_path = sys.argv[1] if len(sys.argv) > 1 else "my_vault.db"
+    try:
+        vault = rust_vault.RustVault.from_env(db_path)
+    except rust_vault.WrongPassphraseError:
+        sys.exit("La passphrase no corresponde a este vault.")
+    except rust_vault.InvalidInputError as e:
+        sys.exit(f"Configuración inválida: {e}")
+
     vault.add_secret("api_key", "mi_clave_api_super_secreta")
     vault.add_secret("database_password", "contraseña_muy_segura")
+    print("Secretos:", vault.list_secrets())
+    print("api_key recuperada:", mask(vault.get_secret("api_key")))
 
-    # Listar los secretos
-    secrets = vault.list_secrets()
-    print("Secretos en el vault:", secrets)
+    cert = vault.generate_certificate("example.com", days=90, store_key_as="tls/example.com/key")
+    print("Certificado:", cert["certificate_pem"].splitlines()[0], "… (clave privada guardada en el vault)")
 
-    # Obtener y mostrar un secreto
-    api_key = vault.get_secret("api_key")
-    print("API Key recuperada:", api_key)
-
-    # Generar un certificado
-    cert = vault.generate_certificate("example.com")
-    print("Certificado generado:", cert[:100] + "...") # Mostramos solo una parte para no saturar la salida
-
-    # Eliminar un secreto
     vault.delete_secret("database_password")
-    
-    # Verificar que el secreto se eliminó
-    remaining_secrets = vault.list_secrets()
-    print("Secretos restantes:", remaining_secrets)
+    print("Secretos restantes:", vault.list_secrets())
 
-    # Encriptar y desencriptar datos arbitrarios
-    data = b"Datos sensibles"
-    encrypted = vault.encrypt(data)
-    print("Datos encriptados:", encrypted)
-    decrypted = vault.decrypt(encrypted)
-    print("Datos desencriptados:", bytes(decrypted).decode())
+    token = vault.encrypt(b"Datos sensibles", context="demo")
+    print("Descifrado:", bytes(vault.decrypt(token, context="demo")).decode())
+    print("Vuelva a ejecutar el script: los secretos siguen ahí.")
+
 
 if __name__ == "__main__":
     main()

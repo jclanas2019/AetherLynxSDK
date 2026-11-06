@@ -1,69 +1,59 @@
+# AetherLynx SDK · Vault
 
-# AetherLynx SDK - Vault
+![AetherLynxVault](AetherLynxVault.png)
 
-Este subproyecto del **AetherLynx SDK** proporciona un **Vault** seguro para gestionar información sensible utilizando una combinación de **Rust** y **Python**. Está diseñado para proporcionar almacenamiento seguro con acceso controlado, asegurando confidencialidad y fácil integración con otros módulos.
-![AetherLynxVault](/tools/vault/AetherLynxVault.png)
+Almacén de secretos en SQLite, cifrado con AES-256-GCM. El núcleo está en Rust y se usa desde Python.
 
+## Cómo protege los secretos
 
-## Estructura del Proyecto
+- **Clave derivada, no guardada.** La clave se deriva de una passphrase con Argon2id (64 MiB, 3 pasadas). La sal y los parámetros se guardan en la tabla `vault_meta`; la passphrase y la clave, nunca. La misma passphrase reabre el vault tras un reinicio.
+- **Passphrase incorrecta detectada.** Un valor de control cifrado ("canario") permite rechazar una passphrase equivocada sin tocar los datos.
+- **Cada secreto ligado a su nombre.** El nombre se usa como datos autenticados (AAD): copiar el ciphertext de un secreto en otra fila hace fallar el descifrado.
+- **Nonce aleatorio de 96 bits** por cada cifrado.
+- **Rotación.** `change_passphrase()` vuelve a cifrar todos los secretos con una clave nueva en una sola transacción. Si otro proceso tiene el vault abierto, sus operaciones fallan con `StaleVaultError` en vez de escribir con la clave vieja; reábralo con la passphrase nueva. Los tokens de `encrypt()` viven fuera del vault y **no** se re-cifran: descífrelos antes de rotar.
+- **Parámetros acotados.** Argon2id exige al menos 19 MiB y 2 pasadas (mínimo de OWASP) y como máximo 4 GiB, 10 pasadas y 16 hilos, también al leerlos de la base: un archivo manipulado no puede forzar a reservar memoria sin límite.
 
-### Archivos de Código
+## Compilar
 
-- **`lib.rs`**: Define la lógica principal del vault en Rust, incluyendo el manejo de la encriptación y control de acceso.
-- **`main.py`**: Aplicación Python que interactúa con el vault utilizando bindings de Rust y proporciona una API básica.
-- **`my_vault.db`**: Base de datos SQLite que almacena los datos sensibles.
-- **`Cargo.toml`**: Define las dependencias de Rust y las configuraciones necesarias para el proyecto.
-
-## Requisitos
-
-- **Python 3.11** o superior
-- **Rust** y **Cargo** instalados
-- **Maturin**: Para compilar los módulos Rust y enlazarlos con Python
-- **Uvicorn**: Para ejecutar la API con FastAPI
-
-### Instalación de Maturin
 ```bash
 pip install maturin
+maturin develop --release
 ```
 
-## Configuración del Proyecto
+## Uso
 
-1. Verifica las dependencias en el archivo `Cargo.toml`.
-2. Asegúrate de tener el archivo de base de datos `my_vault.db` en el directorio adecuado.
-3. Realiza las configuraciones necesarias en `lib.rs` si necesitas ajustes adicionales en la lógica del vault.
+```python
+import rust_vault
 
-## Compilación y Desarrollo
+# La passphrase viene del entorno o de su gestor de secretos, nunca del código.
+vault = rust_vault.RustVault.from_env("secrets.db")   # lee AETHERLYNX_VAULT_PASSPHRASE
+# o: rust_vault.RustVault("secrets.db", passphrase)
 
-Para compilar y desarrollar el proyecto, usa el siguiente comando:
+vault.add_secret("db/password", "...")      # crea o actualiza
+vault.get_secret("db/password")
+vault.list_secrets()
+vault.delete_secret("db/password")          # True si existía
+
+token = vault.encrypt(b"datos", context="facturas")
+vault.decrypt(token, context="facturas")    # el contexto debe coincidir
+
+cert = vault.generate_certificate("api.example.com", days=90, store_key_as="tls/api/key")
+cert["certificate_pem"], cert["private_key_pem"]
+
+vault.change_passphrase("nueva passphrase larga")
+```
+
+Excepciones: `WrongPassphraseError`, `SecretNotFoundError`, `InvalidInputError`, `DecryptionError`, `StaleVaultError`, `LegacyVaultError`; todas heredan de `VaultError`.
+
+Demostración: `AETHERLYNX_VAULT_PASSPHRASE='...' python main.py`. Ejecútela dos veces: los secretos siguen ahí.
+
+## Pruebas
 
 ```bash
-maturin develop
+cargo test
+pip install pytest && pytest -q tests
 ```
 
-Este comando compilará el código Rust e instalará los módulos como extensiones de Python para permitir su uso inmediato.
+## Migración desde la versión 0.1
 
-## Ejecución de la API
-
-Después de compilar los módulos, ejecuta la API de la siguiente manera:
-
-```bash
-uvicorn main:app --reload
-```
-
-La API estará disponible en: `http://127.0.0.1:8000`.
-
-## Pruebas del Sistema
-
-1. Asegúrate de que los datos sensibles se almacenen y recuperen correctamente desde `my_vault.db`.
-2. Prueba las funcionalidades del vault mediante solicitudes a la API utilizando herramientas como `Postman` o `curl`.
-
-Ejemplo de prueba rápida:
-```bash
-python main.py
-```
-
-## Contribuciones
-
-1. Realiza un **fork** del proyecto.
-2. Crea una nueva **rama** para tus cambios.
-3. Envía un **pull request** con una descripción detallada de los cambios realizados.
+La 0.1 generaba una clave aleatoria en cada arranque y no la guardaba, así que sus secretos no se pueden descifrar. La 0.2 detecta esas bases (`LegacyVaultError`) y no las modifica. Cree un archivo nuevo, vuelva a cargar los secretos desde su origen y **rote cualquier credencial** que haya pasado por la base anterior.

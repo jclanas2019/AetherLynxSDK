@@ -1,0 +1,9 @@
+target/
+**/target/
+**/__pycache__/
+**/.pytest_cache/
+*.db
+*.db-wal
+*.db-shm
+.git/
+kubernetes/

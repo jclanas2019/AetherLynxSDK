@@ -1,0 +1,8 @@
+# El agente no necesita hablar con el API de Kubernetes: cuenta de servicio
+# propia, sin permisos y sin token montado.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: university-agent
+  namespace: aetherlynx
+automountServiceAccountToken: false

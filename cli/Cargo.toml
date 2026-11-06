@@ -1,13 +1,23 @@
 [package]
 name = "aetherlynx-cli"
-version = "0.1.0"
-edition = "2021"
+description = "CLI para el orquestador AetherLynx"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "aetherlynx-cli"
+path = "src/main.rs"
 
 [dependencies]
-clap = { version = "4.3", features = ["derive"] }
-tonic = "0.9"
-prost = "0.11"
-tokio = { version = "1.0", features = ["full"] }
+tokio.workspace = true
+tonic = { workspace = true, features = ["tls-native-roots"] }
+prost.workspace = true
+tonic-prost.workspace = true
+clap.workspace = true
+serde_json.workspace = true
 
 [build-dependencies]
-tonic-build = "0.9"
+tonic-prost-build.workspace = true

@@ -1,19 +1,29 @@
 [package]
 name = "rust_vault"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
+rust-version = "1.88"
+description = "Vault de secretos de AetherLynx (AES-256-GCM + Argon2id), con bindings para Python"
+license = "Apache-2.0"
+repository = "https://github.com/jclanas2019/AetherLynxSDK"
 
 [lib]
 name = "rust_vault"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-pyo3 = { version = "0.18", features = ["extension-module"] }
-ring = "0.16"
-rcgen = "0.10"
-base64 = "0.13"
-chrono = "0.4"
-rusqlite = { version = "0.28", features = ["bundled"] }
+# >= 0.29 corrige RUSTSEC-2025-0020, RUSTSEC-2026-0176 y RUSTSEC-2026-0177
+pyo3 = { version = "0.30", features = ["abi3-py39"] }
+ring = "0.17"
+argon2 = { version = "0.5", features = ["std"] }
+rcgen = "0.13"
+time = "0.3"
+base64 = "0.22"
+rusqlite = { version = "0.32", features = ["bundled"] }
+zeroize = "1.8"
 
-[build-dependencies]
-pyo3-build-config = "0.18"
+[dev-dependencies]
+tempfile = "3"
+
+[features]
+extension-module = ["pyo3/extension-module"]

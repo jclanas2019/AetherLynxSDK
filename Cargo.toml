@@ -1,0 +1,23 @@
+[workspace]
+resolver = "2"
+members = ["agent_system", "cli"]
+exclude = ["tools/vault", "tools/pam_ipa_project"]
+# Los módulos Python (tools/vault, tools/pam_ipa_project) se compilan con
+# maturin por separado y no forman parte de este workspace.
+
+[workspace.package]
+version = "0.2.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/jclanas2019/AetherLynxSDK"
+rust-version = "1.88"
+
+[workspace.dependencies]
+tokio = { version = "1.40", features = ["macros", "rt-multi-thread", "signal", "time", "sync", "net"] }
+tonic = { version = "0.14", features = ["tls-ring"] }
+tonic-prost = "0.14"
+prost = "0.14"
+tonic-prost-build = "0.14"
+clap = { version = "4.5", features = ["derive", "env"] }
+tracing = "0.1"
+serde_json = "1.0"

@@ -1,0 +1,68 @@
+syntax = "proto3";
+
+// API del orquestador AetherLynx.
+// Fuente única compartida por `agent_system` (servidor) y `cli` (cliente).
+package aetherlynx.v1;
+
+service AetherLynx {
+  // Registra un agente con un número deseado de réplicas.
+  rpc CreateAgent(CreateAgentRequest) returns (Agent);
+  // Cambia el número deseado de réplicas; el reconciliador converge hacia él.
+  rpc ScaleAgent(ScaleAgentRequest) returns (Agent);
+  // Marca el agente para terminación; se elimina al llegar a 0 réplicas.
+  rpc DeleteAgent(DeleteAgentRequest) returns (Agent);
+  rpc GetAgent(GetAgentRequest) returns (Agent);
+  rpc ListAgents(ListAgentsRequest) returns (ListAgentsResponse);
+  rpc GetStatus(GetStatusRequest) returns (OrchestratorStatus);
+}
+
+enum AgentPhase {
+  AGENT_PHASE_UNSPECIFIED = 0;
+  AGENT_PHASE_PENDING = 1;      // registrado, aún sin réplicas listas
+  AGENT_PHASE_SCALING = 2;      // réplicas listas != deseadas
+  AGENT_PHASE_READY = 3;        // réplicas listas == deseadas
+  AGENT_PHASE_TERMINATING = 4;  // borrado solicitado, bajando a 0
+  AGENT_PHASE_FAILED = 5;       // el runtime informó un error
+}
+
+message Agent {
+  string name = 1;
+  string model = 2;
+  uint32 desired_replicas = 3;
+  uint32 ready_replicas = 4;
+  AgentPhase phase = 5;
+  int64 created_at_unix = 6;
+  // Se incrementa con cada cambio del estado deseado.
+  uint64 generation = 7;
+  string message = 8;
+}
+
+message CreateAgentRequest {
+  string name = 1;
+  string model = 2;
+  uint32 replicas = 3;
+}
+
+message ScaleAgentRequest {
+  string name = 1;
+  uint32 replicas = 2;
+}
+
+message DeleteAgentRequest { string name = 1; }
+message GetAgentRequest { string name = 1; }
+message ListAgentsRequest {}
+message ListAgentsResponse { repeated Agent agents = 1; }
+message GetStatusRequest {}
+
+message OrchestratorStatus {
+  string version = 1;
+  uint64 uptime_seconds = 2;
+  uint32 agents = 3;
+  uint32 desired_replicas_total = 4;
+  uint32 ready_replicas_total = 5;
+  uint64 reconcile_cycles = 6;
+  int64 last_reconcile_unix = 7;
+  bool integration_enabled = 8;
+  bool integration_healthy = 9;
+  string integration_detail = 10;
+}
