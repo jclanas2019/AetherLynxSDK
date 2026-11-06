@@ -18,7 +18,7 @@ ring = "0.17"
 argon2 = { version = "0.5", features = ["std"] }
 rcgen = "0.13"
 time = "0.3"
-base64 = "0.22"
+base64 = "0.23"
 rusqlite = { version = "0.32", features = ["bundled"] }
 zeroize = "1.8"
 
