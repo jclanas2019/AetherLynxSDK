@@ -5,8 +5,10 @@ use clap::{Parser, Subcommand, ValueEnum};
 use serde_json::json;
 
 mod grpc_client;
+mod telemetry_client;
 use grpc_client::proto::*;
-use grpc_client::{connect, describe};
+use grpc_client::{connect, describe, TraceContext};
+use telemetry_client::TelemetryClient;
 
 #[derive(Parser)]
 #[command(
@@ -41,6 +43,32 @@ struct Cli {
     #[arg(long, short, global = true, value_enum, default_value = "table")]
     output: Output,
 
+    /// Muestra en stderr el identificador de traza de esta operación
+    #[arg(long, global = true)]
+    show_trace: bool,
+
+    /// URL del panel/API del colector de telemetría
+    #[arg(
+        long,
+        global = true,
+        env = "AETHERLYNX_TELEMETRY_URL",
+        default_value = "http://127.0.0.1:8088"
+    )]
+    telemetry_url: String,
+
+    /// Token de consulta del colector
+    #[arg(
+        long,
+        global = true,
+        env = "AETHERLYNX_TELEMETRY_TOKEN",
+        hide_env_values = true
+    )]
+    telemetry_token: Option<String>,
+
+    /// CA del colector para TLS (PEM)
+    #[arg(long, global = true, env = "AETHERLYNX_TELEMETRY_CA_CERT")]
+    telemetry_ca_cert: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -59,6 +87,57 @@ enum Command {
     /// Consulta el orquestador
     #[command(subcommand)]
     Orchestrator(OrchestratorCmd),
+    /// Consulta el colector de telemetría (alertas, trazas, logs)
+    #[command(subcommand)]
+    Telemetry(TelemetryCmd),
+}
+
+#[derive(Subcommand)]
+enum TelemetryCmd {
+    /// Alertas activas. Sale con código 2 si hay alguna crítica.
+    Alerts,
+    /// Servicios que envían telemetría, con peticiones, errores y latencia
+    Services {
+        #[arg(long, default_value = "15m")]
+        since: String,
+    },
+    /// Peticiones recientes (spans raíz)
+    Traces {
+        #[arg(long, default_value = "15m")]
+        since: String,
+        #[arg(long)]
+        service: Option<String>,
+        /// Solo peticiones con error
+        #[arg(long)]
+        errors: bool,
+        #[arg(long, default_value_t = 30)]
+        limit: u32,
+    },
+    /// Una traza completa, con sus spans en árbol y sus logs
+    Trace {
+        /// Identificador de 32 caracteres hexadecimales
+        id: String,
+    },
+    /// Logs recientes
+    Logs {
+        #[arg(long, default_value = "15m")]
+        since: String,
+        #[arg(long)]
+        service: Option<String>,
+        /// Nivel mínimo: 9 info, 13 aviso, 17 error
+        #[arg(long, default_value_t = 0)]
+        severity: i32,
+        /// Solo los logs de esta traza
+        #[arg(long)]
+        trace: Option<String>,
+        /// Texto a buscar en el mensaje
+        #[arg(long)]
+        grep: Option<String>,
+        #[arg(long, default_value_t = 100)]
+        limit: u32,
+    },
+    /// Estado del propio colector
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -166,6 +245,7 @@ fn print_status(s: &OrchestratorStatus, out: Output) {
         let v = json!({
             "version": s.version, "uptime_seconds": s.uptime_seconds, "agents": s.agents,
             "desired_replicas_total": s.desired_replicas_total, "ready_replicas_total": s.ready_replicas_total,
+            "runtime": s.runtime,
             "reconcile_cycles": s.reconcile_cycles, "last_reconcile_unix": s.last_reconcile_unix,
             "integration": { "enabled": s.integration_enabled, "healthy": s.integration_healthy, "detail": s.integration_detail },
         });
@@ -173,6 +253,7 @@ fn print_status(s: &OrchestratorStatus, out: Output) {
         return;
     }
     println!("Versión:        {}", s.version);
+    println!("Runtime:        {}", s.runtime);
     println!("En marcha:      {} s", s.uptime_seconds);
     println!("Agentes:        {}", s.agents);
     println!(
@@ -190,11 +271,69 @@ fn print_status(s: &OrchestratorStatus, out: Output) {
     println!("Integración:    {integ}");
 }
 
-async fn run(cli: Cli) -> Result<(), String> {
-    let mut c = connect(&cli.endpoint, cli.token.as_deref(), cli.ca_cert.as_deref()).await?;
+/// Devuelve el código de salida: 0 normal, 2 si `telemetry alerts` encontró alertas críticas.
+async fn run_telemetry(cli: &Cli, cmd: TelemetryCmd) -> Result<u8, String> {
+    let t = TelemetryClient::new(
+        &cli.telemetry_url,
+        cli.telemetry_token.clone(),
+        cli.telemetry_ca_cert.as_deref(),
+    )?;
+    let json = cli.output == Output::Json;
+    match cmd {
+        TelemetryCmd::Alerts => return Ok(if t.alerts(json).await? { 2 } else { 0 }),
+        TelemetryCmd::Services { since } => t.services(&since, json).await?,
+        TelemetryCmd::Traces {
+            since,
+            service,
+            errors,
+            limit,
+        } => t.traces(&since, service, errors, limit, json).await?,
+        TelemetryCmd::Trace { id } => t.trace(&id, json).await?,
+        TelemetryCmd::Logs {
+            since,
+            service,
+            severity,
+            trace,
+            grep,
+            limit,
+        } => {
+            t.logs(&since, service, severity, trace, grep, limit, json)
+                .await?
+        }
+        TelemetryCmd::Status => t.status(json).await?,
+    }
+    Ok(0)
+}
+
+async fn run(mut cli: Cli) -> Result<u8, String> {
+    let command = std::mem::replace(
+        &mut cli.command,
+        Command::Orchestrator(OrchestratorCmd::Status),
+    );
+    if let Command::Telemetry(cmd) = command {
+        return run_telemetry(&cli, cmd).await;
+    }
+    let trace = TraceContext::new();
+    let trace_id = trace.trace_id.clone();
+    let result = run_orchestrator(&cli, command, trace).await;
+    if cli.show_trace {
+        eprintln!("traza: {trace_id}  (aetherlynx-cli telemetry trace {trace_id})");
+    }
+    result.map(|_| 0)
+}
+
+async fn run_orchestrator(cli: &Cli, command: Command, trace: TraceContext) -> Result<(), String> {
+    let mut c = connect(
+        &cli.endpoint,
+        cli.token.as_deref(),
+        cli.ca_cert.as_deref(),
+        trace,
+    )
+    .await?;
     let out = cli.output;
     let e = |s: tonic::Status| describe(&s);
-    match cli.command {
+    match command {
+        Command::Telemetry(_) => unreachable!("se atiende en run_telemetry"),
         Command::Agent(AgentCmd::Create {
             name,
             model,
@@ -259,7 +398,7 @@ async fn run(cli: Cli) -> Result<(), String> {
 async fn main() -> ExitCode {
     let cli = Cli::parse();
     match run(cli).await {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => ExitCode::from(code),
         Err(msg) => {
             eprintln!("error: {msg}");
             ExitCode::FAILURE

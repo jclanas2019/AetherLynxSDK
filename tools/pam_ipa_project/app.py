@@ -33,7 +33,9 @@ from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
+import observability
 import pam_ipa_project as pamlib
+from opentelemetry import metrics, trace
 from pam_ipa_project import PyAudit, PyAuthManager, PyIPA
 
 log = logging.getLogger("aetherlynx.auth")
@@ -144,10 +146,25 @@ async def lifespan(_app: FastAPI):
     state.audit = PyAudit(s.db_path)
     state.limiter = RateLimiter(s.rate_limit_per_minute)
     _bootstrap_admin(s)
-    yield
+    telemetry = observability.setup("aetherlynx-auth", VERSION)
+    try:
+        yield
+    finally:
+        telemetry.shutdown()
 
 
-app = FastAPI(title="AetherLynx Auth", version="0.2.0", lifespan=lifespan)
+VERSION = "0.4.0"
+app = FastAPI(title="AetherLynx Auth", version=VERSION, lifespan=lifespan, **observability.fastapi_kwargs())
+observability.instrument_fastapi(app, "aetherlynx.auth")
+
+# Telemetría de negocio. Nunca lleva el nombre de usuario ni la IP: sólo el
+# resultado, para que el colector pueda detectar picos de fallos (fuerza bruta).
+_meter = metrics.get_meter("aetherlynx.auth")
+LOGINS = _meter.create_counter(
+    "aetherlynx.auth.logins", description="Inicios de sesión por resultado (success, failure, denied, rate_limited)"
+)
+REGISTRATIONS = _meter.create_counter("aetherlynx.auth.registrations", description="Altas de usuario por origen")
+RATE_LIMITED = _meter.create_counter("aetherlynx.auth.rate_limited", description="Peticiones rechazadas por límite")
 
 
 # --------------------------------------------------------------------------
@@ -206,6 +223,10 @@ Admin = Annotated[str, Depends(require_admin)]
 def rate_limited(request: Request) -> None:
     ip = request.client.host if request.client else "desconocida"
     if not state.limiter.allow((ip, request.url.path)):
+        route = getattr(request.scope.get("route"), "path", request.url.path)
+        RATE_LIMITED.add(1, {"route": route})
+        if route == "/authenticate":
+            LOGINS.add(1, {"result": "rate_limited"})
         raise HTTPException(
             status.HTTP_429_TOO_MANY_REQUESTS, "demasiadas peticiones; espere un minuto", headers={"Retry-After": "60"}
         )
@@ -282,6 +303,7 @@ def register_user(body: UserRegister) -> dict:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "el auto-registro está desactivado")
     name = state.auth.register_user(body.username, body.password)
     state.ipa.add_role(name, state.settings.default_role)
+    REGISTRATIONS.add(1, {"source": "self"})
     return {"message": "usuario registrado", "username": name, "roles": [state.settings.default_role]}
 
 
@@ -289,16 +311,27 @@ def register_user(body: UserRegister) -> dict:
 def create_user(body: UserRegister, _admin: Admin) -> dict:
     """Alta por un administrador (sin rol; asígnelo con /assign-role)."""
     name = state.auth.register_user(body.username, body.password)
+    REGISTRATIONS.add(1, {"source": "admin"})
     return {"message": "usuario creado", "username": name}
 
 
 @app.post("/authenticate", response_model=TokenResponse, dependencies=[RateLimited])
 def authenticate_user(body: UserAuth) -> TokenResponse:
-    token = state.auth.authenticate_user(body.username, body.password)
+    span = trace.get_current_span()
+    try:
+        token = state.auth.authenticate_user(body.username, body.password)
+    except (pamlib.InvalidCredentialsError, pamlib.InvalidInputError):
+        LOGINS.add(1, {"result": "failure"})
+        span.set_attribute("aetherlynx.auth.result", "failure")
+        raise
     if body.resource is not None:
         user = body.username.strip().lower()
         if not state.ipa.has_access(user, body.resource):
+            LOGINS.add(1, {"result": "denied"})
+            span.set_attribute("aetherlynx.auth.result", "denied")
             raise HTTPException(status.HTTP_403_FORBIDDEN, "acceso denegado al recurso")
+    LOGINS.add(1, {"result": "success"})
+    span.set_attribute("aetherlynx.auth.result", "success")
     return TokenResponse(access_token=token, expires_in=state.auth.token_ttl_seconds, resource=body.resource)
 
 

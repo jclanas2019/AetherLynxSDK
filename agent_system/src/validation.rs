@@ -17,14 +17,19 @@ impl std::fmt::Display for ValidationError {
 
 impl std::error::Error for ValidationError {}
 
+/// Longitud máxima del nombre de un agente: en Kubernetes sus objetos se
+/// llaman `aetherlynx-<nombre>` y un nombre de Service admite 63 caracteres.
+pub const AGENT_NAME_MAX: usize = 63 - crate::kubernetes::NAME_PREFIX.len();
+
 /// Nombre de agente: etiqueta DNS-1123 (como los nombres de Kubernetes).
-/// Minúsculas, dígitos y guiones; 1-63 caracteres; empieza y termina en alfanumérico.
+/// Minúsculas, dígitos y guiones; 1-52 caracteres; empieza y termina en
+/// alfanumérico.
 pub fn agent_name(name: &str) -> Result<(), ValidationError> {
     let bytes = name.as_bytes();
-    if bytes.is_empty() || bytes.len() > 63 {
-        return Err(ValidationError(
-            "el nombre debe tener entre 1 y 63 caracteres".into(),
-        ));
+    if bytes.is_empty() || bytes.len() > AGENT_NAME_MAX {
+        return Err(ValidationError(format!(
+            "el nombre debe tener entre 1 y {AGENT_NAME_MAX} caracteres"
+        )));
     }
     let ok_char = |c: &u8| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-';
     if !bytes.iter().all(ok_char) {
@@ -73,7 +78,12 @@ mod tests {
 
     #[test]
     fn valid_names() {
-        for n in ["a", "student-agent", "agent-01", &"a".repeat(63)] {
+        for n in [
+            "a",
+            "student-agent",
+            "agent-01",
+            &"a".repeat(AGENT_NAME_MAX),
+        ] {
             assert!(agent_name(n).is_ok(), "{n}");
         }
     }
@@ -89,7 +99,7 @@ mod tests {
             "line\nbreak",
             "x\u{0}",
             "ñ",
-            &"a".repeat(64),
+            &"a".repeat(AGENT_NAME_MAX + 1),
         ] {
             assert!(agent_name(n).is_err(), "{n:?}");
         }

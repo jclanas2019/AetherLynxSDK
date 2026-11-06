@@ -1,23 +1,67 @@
 //! Runtime: el lugar donde las réplicas de un agente existen de verdad.
 //!
-//! El reconciliador solo habla con este trait. La implementación incluida,
-//! [`SimulatedRuntime`], mantiene las réplicas en memoria y sube o baja como
-//! máximo `step` réplicas por ciclo, igual que un rollout gradual. Para
-//! producción se implementa el trait contra Kubernetes (escalando un
-//! Deployment por agente) u otro planificador.
+//! El reconciliador solo habla con el trait [`Runtime`]. Hay dos
+//! implementaciones:
+//!
+//! - [`SimulatedRuntime`]: réplicas en memoria que suben o bajan `step` por
+//!   ciclo. Para desarrollo y pruebas.
+//! - [`crate::kubernetes::KubernetesRuntime`]: un Deployment y un Service por
+//!   agente en un namespace de Kubernetes.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use async_trait::async_trait;
+
+/// Lo que el reconciliador quiere para un agente.
+#[derive(Debug, Clone)]
 pub struct DesiredState<'a> {
     pub name: &'a str,
     pub model: &'a str,
     pub desired_replicas: u32,
+    /// El agente se está eliminando: el runtime debe retirar sus recursos.
+    pub deleting: bool,
 }
 
+/// Lo que el runtime observa tras aplicar el estado deseado.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Observation {
+    /// Réplicas listas para atender.
+    pub ready: u32,
+    /// `true` cuando el rollout terminó: no quedan réplicas de versiones
+    /// anteriores ni cambios pendientes de observar. Al eliminar, `true`
+    /// significa que los recursos ya no existen.
+    pub converged: bool,
+}
+
+/// Un agente encontrado en el runtime al arrancar el orquestador.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveredAgent {
+    pub name: String,
+    pub model: String,
+    pub desired_replicas: u32,
+    /// Fecha de creación en el runtime, si la conoce.
+    pub created_at_unix: Option<i64>,
+}
+
+#[async_trait]
 pub trait Runtime: Send + Sync {
-    /// Acerca el agente a su estado deseado y devuelve las réplicas listas.
-    fn apply(&self, desired: &DesiredState<'_>) -> Result<u32, String>;
+    /// Acerca el agente a su estado deseado y devuelve lo observado.
+    /// Un `Err` marca el agente como `Failed` con ese mensaje.
+    async fn apply(&self, desired: &DesiredState<'_>) -> Result<Observation, String>;
+
+    /// Agentes que ya existen en el runtime, para reconstruir el registro al
+    /// arrancar. Así el estado deseado sobrevive a un reinicio del orquestador.
+    async fn recover(&self) -> Result<Vec<RecoveredAgent>, String> {
+        Ok(Vec::new())
+    }
+
+    /// Elimina recursos gestionados por este orquestador que ya no
+    /// corresponden a ningún agente registrado. Devuelve cuántos eliminó.
+    async fn garbage_collect(&self, _known: &[String]) -> Result<usize, String> {
+        Ok(0)
+    }
+
     /// Nombre corto para logs y estado.
     fn kind(&self) -> &'static str;
 }
@@ -36,20 +80,25 @@ impl SimulatedRuntime {
     }
 }
 
+#[async_trait]
 impl Runtime for SimulatedRuntime {
-    fn apply(&self, d: &DesiredState<'_>) -> Result<u32, String> {
+    async fn apply(&self, d: &DesiredState<'_>) -> Result<Observation, String> {
         let mut map = self.replicas.lock().unwrap_or_else(|p| p.into_inner());
+        let target = if d.deleting { 0 } else { d.desired_replicas };
         let cur = map.entry(d.name.to_owned()).or_insert(0);
-        *cur = if *cur < d.desired_replicas {
-            (*cur + self.step).min(d.desired_replicas)
+        *cur = if *cur < target {
+            (*cur + self.step).min(target)
         } else {
-            cur.saturating_sub(self.step).max(d.desired_replicas)
+            cur.saturating_sub(self.step).max(target)
         };
         let ready = *cur;
-        if ready == 0 && d.desired_replicas == 0 {
+        if d.deleting && ready == 0 {
             map.remove(d.name);
         }
-        Ok(ready)
+        Ok(Observation {
+            ready,
+            converged: ready == target,
+        })
     }
 
     fn kind(&self) -> &'static str {
@@ -66,18 +115,44 @@ mod tests {
             name: "a",
             model: "m",
             desired_replicas: n,
+            deleting: false,
         }
     }
 
-    #[test]
-    fn converges_in_steps() {
+    #[tokio::test]
+    async fn converges_in_steps() {
         let rt = SimulatedRuntime::new(2);
-        assert_eq!(rt.apply(&d(5)).unwrap(), 2);
-        assert_eq!(rt.apply(&d(5)).unwrap(), 4);
-        assert_eq!(rt.apply(&d(5)).unwrap(), 5);
-        assert_eq!(rt.apply(&d(5)).unwrap(), 5);
-        assert_eq!(rt.apply(&d(1)).unwrap(), 3);
-        assert_eq!(rt.apply(&d(1)).unwrap(), 1);
-        assert_eq!(rt.apply(&d(0)).unwrap(), 0);
+        let steps = [
+            (5, 2, false),
+            (5, 4, false),
+            (5, 5, true),
+            (5, 5, true),
+            (1, 3, false),
+            (1, 1, true),
+            (0, 0, true),
+        ];
+        for (want, ready, converged) in steps {
+            assert_eq!(
+                rt.apply(&d(want)).await.unwrap(),
+                Observation { ready, converged }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn deleting_drains_to_zero() {
+        let rt = SimulatedRuntime::new(10);
+        rt.apply(&d(3)).await.unwrap();
+        let del = DesiredState {
+            deleting: true,
+            ..d(3)
+        };
+        assert_eq!(
+            rt.apply(&del).await.unwrap(),
+            Observation {
+                ready: 0,
+                converged: true
+            }
+        );
     }
 }

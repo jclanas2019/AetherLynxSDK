@@ -10,11 +10,13 @@ use tonic::transport::{Identity, Server, ServerTlsConfig};
 
 use aetherlynx_orchestrator::auth::TokenAuth;
 use aetherlynx_orchestrator::integration::HealthProbe;
+use aetherlynx_orchestrator::kubernetes::{AgentTemplates, KubeRuntimeConfig, KubernetesRuntime};
 use aetherlynx_orchestrator::proto::aether_lynx_server::AetherLynxServer;
 use aetherlynx_orchestrator::reconciler::Reconciler;
 use aetherlynx_orchestrator::registry::Registry;
-use aetherlynx_orchestrator::runtime::SimulatedRuntime;
+use aetherlynx_orchestrator::runtime::{DesiredState, Runtime, SimulatedRuntime};
 use aetherlynx_orchestrator::service::AetherLynxService;
+use aetherlynx_orchestrator::telemetry;
 
 #[derive(Parser)]
 #[command(
@@ -31,6 +33,32 @@ struct Cli {
 enum Command {
     /// Inicia el servidor gRPC y el reconciliador
     Start(StartArgs),
+    /// Muestra el Deployment y el Service que el runtime de Kubernetes
+    /// crearía para un agente (JSON, apto para `kubectl diff -f -`)
+    RenderAgent(RenderArgs),
+}
+
+#[derive(Args)]
+struct RenderArgs {
+    #[arg(long)]
+    name: String,
+    #[arg(long)]
+    model: String,
+    #[arg(long, default_value_t = 1)]
+    replicas: u32,
+    /// Namespace de los objetos
+    #[arg(long, default_value = "aetherlynx")]
+    namespace: String,
+    #[command(flatten)]
+    k8s: K8sArgs,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum RuntimeKind {
+    /// Réplicas en memoria, para desarrollo y pruebas
+    Simulated,
+    /// Un Deployment y un Service por agente en Kubernetes
+    Kubernetes,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -69,9 +97,21 @@ struct StartArgs {
     #[arg(long, default_value = "5s", value_parser = humantime::parse_duration)]
     reconcile_interval: Duration,
 
+    /// Dónde viven las réplicas de los agentes
+    #[arg(
+        long,
+        env = "AETHERLYNX_RUNTIME",
+        value_enum,
+        default_value = "simulated"
+    )]
+    runtime: RuntimeKind,
+
     /// Réplicas que el runtime simulado sube o baja por ciclo
     #[arg(long, default_value_t = 1)]
     scale_step: u32,
+
+    #[command(flatten)]
+    k8s: K8sArgs,
 
     /// Endpoint de salud del sistema transaccional (https), opcional
     #[arg(long, env = "AETHERLYNX_INTEGRATION_URL")]
@@ -91,14 +131,194 @@ struct StartArgs {
     log_format: LogFormat,
 }
 
-fn init_logging(format: LogFormat) {
-    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    let builder = tracing_subscriber::fmt().with_env_filter(filter);
-    match format {
-        LogFormat::Text => builder.init(),
-        LogFormat::Json => builder.json().init(),
+/// Opciones del runtime de Kubernetes (solo con `--runtime kubernetes`).
+#[derive(Args)]
+#[command(next_help_heading = "Runtime de Kubernetes")]
+struct K8sArgs {
+    /// Imagen del contenedor de los agentes (obligatoria). Fije una versión.
+    #[arg(long, env = "AETHERLYNX_AGENT_IMAGE")]
+    agent_image: Option<String>,
+
+    /// Namespace de los agentes (por defecto, el del orquestador o el del kubeconfig)
+    #[arg(long, env = "AETHERLYNX_K8S_NAMESPACE")]
+    k8s_namespace: Option<String>,
+
+    /// Distingue a varios orquestadores en un mismo namespace
+    #[arg(long, env = "AETHERLYNX_INSTANCE", default_value = "default")]
+    instance: String,
+
+    /// Secret con las credenciales de los agentes ("" para ninguno)
+    #[arg(
+        long,
+        env = "AETHERLYNX_AGENT_SECRET",
+        default_value = "university-agent-secrets"
+    )]
+    agent_secret: String,
+
+    /// ConfigMap con la configuración de los agentes ("" para ninguno)
+    #[arg(
+        long,
+        env = "AETHERLYNX_AGENT_CONFIGMAP",
+        default_value = "university-agent-config"
+    )]
+    agent_configmap: String,
+
+    /// ServiceAccount de los pods de agente ("" para la del namespace)
+    #[arg(
+        long,
+        env = "AETHERLYNX_AGENT_SERVICE_ACCOUNT",
+        default_value = "university-agent"
+    )]
+    agent_service_account: String,
+
+    /// Prefijo de los objetos de telemetría de los agentes: ConfigMap
+    /// `<p>-client`, Secret `<p>-ingest` y ConfigMap `<p>-ca`, todos
+    /// opcionales ("" para no usarlos)
+    #[arg(
+        long,
+        env = "AETHERLYNX_AGENT_TELEMETRY",
+        default_value = "aetherlynx-telemetry"
+    )]
+    agent_telemetry: String,
+
+    #[arg(long, default_value = "100m")]
+    agent_cpu_request: String,
+    #[arg(long, default_value = "192Mi")]
+    agent_memory_request: String,
+    #[arg(long, default_value = "512Mi")]
+    agent_memory_limit: String,
+}
+
+fn non_empty(s: &str) -> Option<String> {
+    (!s.trim().is_empty()).then(|| s.trim().to_owned())
+}
+
+impl K8sArgs {
+    fn config(&self) -> Result<KubeRuntimeConfig, String> {
+        let image = self.agent_image.clone().ok_or(
+            "con --runtime kubernetes hay que indicar --agent-image (AETHERLYNX_AGENT_IMAGE)",
+        )?;
+        Ok(KubeRuntimeConfig {
+            namespace: self.k8s_namespace.clone(),
+            image,
+            instance: self.instance.clone(),
+            env_from_secret: non_empty(&self.agent_secret),
+            env_from_configmap: non_empty(&self.agent_configmap),
+            service_account: non_empty(&self.agent_service_account),
+            telemetry: non_empty(&self.agent_telemetry),
+            container_port: 5000,
+            cpu_request: self.agent_cpu_request.clone(),
+            memory_request: self.agent_memory_request.clone(),
+            memory_limit: self.agent_memory_limit.clone(),
+        })
     }
+}
+
+fn render_agent(a: RenderArgs) -> Result<(), String> {
+    use aetherlynx_orchestrator::validation;
+    validation::agent_name(&a.name).map_err(|e| e.to_string())?;
+    validation::model_id(&a.model).map_err(|e| e.to_string())?;
+    validation::replicas(a.replicas).map_err(|e| e.to_string())?;
+    let t = AgentTemplates::new(a.k8s.config()?, a.namespace)?;
+    let d = DesiredState {
+        name: &a.name,
+        model: &a.model,
+        desired_replicas: a.replicas,
+        deleting: false,
+    };
+    let to_json = |v: serde_json::Result<serde_json::Value>| v.map_err(|e| e.to_string());
+    let mut dep = to_json(serde_json::to_value(t.deployment_manifest(&d)))?;
+    let mut svc = to_json(serde_json::to_value(t.service_manifest(&d, None)))?;
+    dep["apiVersion"] = "apps/v1".into();
+    dep["kind"] = "Deployment".into();
+    svc["apiVersion"] = "v1".into();
+    svc["kind"] = "Service".into();
+    let list = serde_json::json!({"apiVersion": "v1", "kind": "List", "items": [dep, svc]});
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&list).map_err(|e| e.to_string())?
+    );
+    Ok(())
+}
+
+async fn build_runtime(a: &StartArgs) -> Result<Arc<dyn Runtime>, String> {
+    match a.runtime {
+        RuntimeKind::Simulated => Ok(Arc::new(SimulatedRuntime::new(a.scale_step))),
+        RuntimeKind::Kubernetes => {
+            let k = &a.k8s;
+            let rt = KubernetesRuntime::connect(k.config()?).await?;
+            tracing::info!(namespace = rt.namespace(), instance = %k.instance, "runtime de Kubernetes listo");
+            Ok(Arc::new(rt))
+        }
+    }
+}
+
+/// Gauges observables: se leen del registro cada vez que se exportan.
+fn register_gauges(
+    registry: Arc<Registry>,
+    stats: Arc<aetherlynx_orchestrator::reconciler::ReconcileStats>,
+) {
+    use aetherlynx_orchestrator::proto::AgentPhase;
+    use aetherlynx_orchestrator::telemetry::{meter, names};
+    use opentelemetry::KeyValue;
+    let started = aetherlynx_orchestrator::unix_now();
+    let m = meter();
+    let reg = registry.clone();
+    let _ = m
+        .u64_observable_gauge(names::AGENTS)
+        .with_description("Agentes por fase")
+        .with_callback(move |o| {
+            let agents = reg.list();
+            for (phase, label) in [
+                (AgentPhase::Pending, "pending"),
+                (AgentPhase::Scaling, "scaling"),
+                (AgentPhase::Ready, "ready"),
+                (AgentPhase::Terminating, "terminating"),
+                (AgentPhase::Failed, "failed"),
+            ] {
+                let n = agents.iter().filter(|a| a.phase == phase).count() as u64;
+                o.observe(n, &[KeyValue::new("phase", label)]);
+            }
+        })
+        .build();
+    let reg = registry.clone();
+    let _ = m
+        .u64_observable_gauge(names::REPLICAS_DESIRED)
+        .with_description("Réplicas pedidas, total de todos los agentes")
+        .with_callback(move |o| {
+            o.observe(
+                reg.list()
+                    .iter()
+                    .map(|a| u64::from(a.desired_replicas))
+                    .sum(),
+                &[],
+            )
+        })
+        .build();
+    let reg = registry;
+    let _ = m
+        .u64_observable_gauge(names::REPLICAS_READY)
+        .with_description("Réplicas listas, total de todos los agentes")
+        .with_callback(move |o| {
+            o.observe(
+                reg.list().iter().map(|a| u64::from(a.ready_replicas)).sum(),
+                &[],
+            )
+        })
+        .build();
+    let _ = m
+        .i64_observable_gauge(names::RECONCILE_LAST_SUCCESS)
+        .with_unit("s")
+        .with_description("Momento (unix) del último ciclo de reconciliación con progreso")
+        .with_callback(move |o| {
+            // Hasta el primer éxito se informa la hora de arranque: si nunca
+            // llega a haber uno, la alerta salta igual pasado el umbral.
+            let t = stats
+                .last_success_unix
+                .load(std::sync::atomic::Ordering::Relaxed);
+            o.observe(if t > 0 { t } else { started }, &[]);
+        })
+        .build();
 }
 
 /// Valida la combinación de opciones de seguridad antes de abrir el puerto.
@@ -158,9 +378,18 @@ async fn start(a: StartArgs) -> Result<(), String> {
     }
 
     let registry = Arc::new(Registry::new());
-    let runtime = Arc::new(SimulatedRuntime::new(a.scale_step));
+    let runtime = build_runtime(&a).await?;
+    let runtime_kind = runtime.kind();
     let reconciler = Reconciler::new(registry.clone(), runtime);
     let stats = reconciler.stats.clone();
+    register_gauges(registry.clone(), stats.clone());
+
+    // Antes de aceptar peticiones: recuperar los agentes que ya existen en el
+    // runtime, para no duplicarlos ni borrarlos como huérfanos.
+    let recovered = reconciler.recover().await?;
+    if recovered > 0 {
+        tracing::info!(agents = recovered, "agentes recuperados del runtime");
+    }
 
     let (tx, rx) = watch::channel(false);
 
@@ -170,7 +399,7 @@ async fn start(a: StartArgs) -> Result<(), String> {
     };
     let health = probe.as_ref().map(|p| p.state());
 
-    let service = AetherLynxService::new(registry, stats, health);
+    let service = AetherLynxService::new(registry, stats, health).with_runtime_kind(runtime_kind);
     let mut builder = Server::builder();
     if let (Some(cert), Some(key)) = (&a.tls_cert, &a.tls_key) {
         let cert =
@@ -216,16 +445,38 @@ async fn start(a: StartArgs) -> Result<(), String> {
 async fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
+        Command::RenderAgent(args) => match render_agent(args) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::FAILURE
+            }
+        },
         Command::Start(args) => {
-            init_logging(args.log_format);
-            match start(args).await {
+            let mut telemetry = match telemetry::init(matches!(args.log_format, LogFormat::Json)) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("error: telemetría: {e}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            if let Some(ep) = &telemetry.endpoint {
+                tracing::info!(endpoint = %ep, "exportando telemetría por OTLP");
+            }
+            let code = match start(args).await {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
                     tracing::error!("{e}");
                     eprintln!("error: {e}");
                     ExitCode::FAILURE
                 }
-            }
+            };
+            // Envía lo pendiente antes de salir. Se hace fuera del runtime
+            // async porque los exportadores usan un cliente bloqueante.
+            tokio::task::spawn_blocking(move || telemetry.shutdown())
+                .await
+                .ok();
+            code
         }
     }
 }

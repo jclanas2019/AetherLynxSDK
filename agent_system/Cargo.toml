@@ -23,12 +23,33 @@ tonic-prost.workspace = true
 clap.workspace = true
 tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking"] }
 subtle = "2.6"
 humantime = "2.1"
+async-trait.workspace = true
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# OpenTelemetry: trazas, métricas y logs por OTLP/HTTP.
+opentelemetry = { version = "0.31", features = ["trace", "metrics", "logs"] }
+opentelemetry_sdk = { version = "0.31", features = ["trace", "metrics", "logs"] }
+opentelemetry-otlp = { version = "0.31", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace", "metrics", "logs"] }
+tracing-opentelemetry = "0.32"
+# experimental_use_tracing_span_context: cada log lleva la traza del span activo.
+opentelemetry-appender-tracing = { version = "0.31", features = ["experimental_use_tracing_span_context"] }
+serde_json.workspace = true
+# Runtime de Kubernetes: un Deployment (y un Service) por agente.
+kube = { version = "1.1", default-features = false, features = ["client", "rustls-tls", "ring", "http-proxy"] }
+k8s-openapi = { version = "0.25", features = ["v1_30"] }
 
 [dev-dependencies]
 tokio-stream = { version = "0.1", features = ["net"] }
+# API de Kubernetes simulado a nivel HTTP para los tests del runtime.
+tower = { version = "0.5", features = ["util"] }
+http = "1"
+http-body-util = "0.1"
+bytes = "1"
+tokio = { workspace = true, features = ["test-util"] }
+# Ya lo trae kube; aquí solo valida los manifiestos de kubernetes/.
+serde_yaml = "0.9"
 
 [build-dependencies]
 tonic-prost-build.workspace = true

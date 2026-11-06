@@ -1,0 +1,20 @@
+# Imagen del colector de telemetría (OTLP + panel web).
+#   docker build -f Dockerfile.telemetry -t <registro>/aetherlynx/telemetry:0.4.0 .
+FROM rust:1.88-slim-bookworm AS build
+WORKDIR /src
+# El workspace necesita todos sus miembros para resolverse, aunque solo se
+# compila el colector (que no usa protoc: los tipos OTLP vienen generados).
+COPY Cargo.toml Cargo.lock ./
+COPY proto proto
+COPY agent_system agent_system
+COPY cli cli
+COPY telemetry telemetry
+RUN cargo build --release --locked -p aetherlynx-telemetry
+
+FROM gcr.io/distroless/cc-debian12:nonroot
+COPY --from=build /src/target/release/aetherlynx-telemetry /usr/local/bin/
+USER nonroot
+EXPOSE 4318 8088
+VOLUME ["/data"]
+ENTRYPOINT ["/usr/local/bin/aetherlynx-telemetry", "start"]
+CMD ["--otlp-listen", "0.0.0.0:4318", "--ui-listen", "0.0.0.0:8088", "--db", "/data/telemetry.db", "--log-format", "json"]

@@ -1,5 +1,5 @@
 # Imagen del orquestador y la CLI.
-#   docker build -f Dockerfile.orchestrator -t <registro>/aetherlynx/orchestrator:0.2.0 .
+#   docker build -f Dockerfile.orchestrator -t <registro>/aetherlynx/orchestrator:0.4.0 .
 FROM rust:1.88-slim-bookworm AS build
 RUN apt-get update \
  && apt-get install -y --no-install-recommends protobuf-compiler \

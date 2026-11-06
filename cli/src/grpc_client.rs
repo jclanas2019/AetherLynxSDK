@@ -1,4 +1,4 @@
-//! Cliente gRPC con token bearer y TLS opcional.
+//! Cliente gRPC con token bearer, TLS opcional y contexto de traza W3C.
 
 use std::path::Path;
 use std::time::Duration;
@@ -14,24 +14,67 @@ pub mod proto {
 
 use proto::aether_lynx_client::AetherLynxClient;
 
+/// Identificador de traza de esta invocación de la CLI. Viaja en la
+/// cabecera `traceparent` (W3C Trace Context): el orquestador continúa la
+/// traza y el colector la muestra completa con
+/// `aetherlynx-cli telemetry trace <id>`.
 #[derive(Clone)]
-pub struct BearerAuth(Option<MetadataValue<tonic::metadata::Ascii>>);
+pub struct TraceContext {
+    pub trace_id: String,
+    traceparent: MetadataValue<tonic::metadata::Ascii>,
+}
 
-impl tonic::service::Interceptor for BearerAuth {
+impl TraceContext {
+    pub fn new() -> Self {
+        let mut trace = [0u8; 16];
+        let mut span = [0u8; 8];
+        // Un identificador todo ceros es inválido en W3C: se reintenta.
+        while trace.iter().all(|b| *b == 0) || span.iter().all(|b| *b == 0) {
+            getrandom::fill(&mut trace).expect("fuente de aleatoriedad del sistema");
+            getrandom::fill(&mut span).expect("fuente de aleatoriedad del sistema");
+        }
+        let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+        let trace_id = hex(&trace);
+        let traceparent = format!("00-{trace_id}-{}-01", hex(&span))
+            .parse()
+            .expect("traceparent ASCII");
+        Self {
+            trace_id,
+            traceparent,
+        }
+    }
+}
+
+impl Default for TraceContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Clone)]
+pub struct ClientInterceptor {
+    auth: Option<MetadataValue<tonic::metadata::Ascii>>,
+    trace: TraceContext,
+}
+
+impl tonic::service::Interceptor for ClientInterceptor {
     fn call(&mut self, mut req: Request<()>) -> Result<Request<()>, Status> {
-        if let Some(v) = &self.0 {
+        if let Some(v) = &self.auth {
             req.metadata_mut().insert("authorization", v.clone());
         }
+        req.metadata_mut()
+            .insert("traceparent", self.trace.traceparent.clone());
         Ok(req)
     }
 }
 
-pub type Client = AetherLynxClient<InterceptedService<Channel, BearerAuth>>;
+pub type Client = AetherLynxClient<InterceptedService<Channel, ClientInterceptor>>;
 
 pub async fn connect(
     endpoint: &str,
     token: Option<&str>,
     ca_cert: Option<&Path>,
+    trace: TraceContext,
 ) -> Result<Client, String> {
     let mut ep = Endpoint::from_shared(endpoint.to_owned())
         .map_err(|e| format!("endpoint inválido '{endpoint}': {e}"))?
@@ -65,16 +108,17 @@ pub async fn connect(
                 .map_err(|_| "el token contiene caracteres no válidos".to_string())?;
             // Evita que el token aparezca en logs o trazas de depuración.
             v.set_sensitive(true);
-            BearerAuth(Some(v))
+            Some(v)
         }
-        None => BearerAuth(None),
+        None => None,
     };
+    let interceptor = ClientInterceptor { auth, trace };
 
     let channel = ep
         .connect()
         .await
         .map_err(|e| format!("no se pudo conectar a {endpoint}: {}", error_chain(&e)))?;
-    Ok(AetherLynxClient::with_interceptor(channel, auth))
+    Ok(AetherLynxClient::with_interceptor(channel, interceptor))
 }
 
 /// "transport error" no dice nada: mostramos la cadena de causas completa.
@@ -93,7 +137,7 @@ fn error_chain(e: &dyn std::error::Error) -> String {
 
 /// Compara el host ya parseado, no un prefijo del texto: `localhost.evil.com`
 /// o `127.0.0.1.example.com` no cuentan como loopback.
-fn is_loopback(host: Option<&str>) -> bool {
+pub(crate) fn is_loopback(host: Option<&str>) -> bool {
     match host {
         Some("localhost") => true,
         Some(h) => h
@@ -119,7 +163,19 @@ pub fn describe(s: &Status) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::is_loopback;
+    use super::{is_loopback, TraceContext};
+
+    #[test]
+    fn traceparent_is_valid_w3c() {
+        let t = TraceContext::new();
+        let tp = t.traceparent.to_str().unwrap();
+        let parts: Vec<_> = tp.split('-').collect();
+        assert_eq!(parts.len(), 4);
+        assert_eq!((parts[0], parts[3]), ("00", "01"));
+        assert_eq!(parts[1], t.trace_id);
+        assert_eq!((parts[1].len(), parts[2].len()), (32, 16));
+        assert_ne!(TraceContext::new().trace_id, t.trace_id);
+    }
 
     #[test]
     fn loopback_detection_uses_the_parsed_host() {

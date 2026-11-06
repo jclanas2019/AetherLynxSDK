@@ -24,6 +24,7 @@ from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 
+import observability
 from student_queries_agent import MAX_QUESTION_CHARS, InvalidRequest, StudentQueryAgent, build_agent
 
 log = logging.getLogger("aetherlynx.agent.service")
@@ -45,12 +46,17 @@ async def lifespan(_app: FastAPI):
     if "REEMPLAZAR" in token.upper() or len(set(token)) < 8:
         raise RuntimeError("AETHERLYNX_AGENT_TOKEN es un valor de ejemplo o trivial; genere uno aleatorio")
     state.token = token.encode()
+    telemetry = observability.setup("aetherlynx-agent", "0.4.0")
     if state.agent is None:
         state.agent = build_agent()
-    yield
+    try:
+        yield
+    finally:
+        telemetry.shutdown()
 
 
-app = FastAPI(title="AetherLynx Student Agent", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="AetherLynx Student Agent", version="0.4.0", lifespan=lifespan, **observability.fastapi_kwargs())
+observability.instrument_fastapi(app, "aetherlynx.agent")
 _bearer = HTTPBearer(auto_error=False)
 
 

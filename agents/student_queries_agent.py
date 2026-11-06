@@ -10,6 +10,10 @@ Principios de esta versión:
     instrucción de no seguir órdenes que aparezcan dentro de él.
   * Errores de los sistemas transaccionales no se filtran al prompt.
   * Timeouts, reintentos acotados y validación del identificador.
+  * Observabilidad con OpenTelemetry: un span por consulta, por llamada al
+    API de la universidad y por llamada al LLM, con métricas de resultado y
+    latencia. La telemetría nunca incluye el identificador del estudiante,
+    la pregunta ni la respuesta.
 
 Configuración (variables de entorno):
   UNIVERSITY_API_URL     URL base https del API de la universidad
@@ -24,15 +28,32 @@ import json
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 from urllib.parse import quote, urlparse
 
 import requests
+from opentelemetry import metrics, trace
+from opentelemetry.trace import SpanKind, Status, StatusCode
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+import observability
+
 log = logging.getLogger("aetherlynx.agent")
+
+_tracer = trace.get_tracer("aetherlynx.agent")
+_meter = metrics.get_meter("aetherlynx.agent")
+QUERIES = _meter.create_counter("aetherlynx.agent.queries", description="Consultas atendidas por resultado")
+LLM_REQUESTS = _meter.create_counter("aetherlynx.agent.llm.requests", description="Llamadas al LLM por resultado")
+LLM_DURATION = observability.latency_histogram(_meter, "aetherlynx.agent.llm.duration", "Duración de las llamadas al LLM")
+UPSTREAM_REQUESTS = _meter.create_counter(
+    "aetherlynx.agent.upstream.requests", description="Consultas al API de la universidad por resultado"
+)
+UPSTREAM_DURATION = observability.latency_histogram(
+    _meter, "aetherlynx.agent.upstream.duration", "Duración de las consultas al API de la universidad"
+)
 
 STUDENT_ID_RE = re.compile(r"^[A-Za-z0-9-]{1,32}$")
 MAX_QUESTION_CHARS = 2000
@@ -100,15 +121,29 @@ class UniversityClient:
 
     def _get(self, path: str, student_id: str) -> dict[str, Any] | None:
         url = f"{self.cfg.api_url}/{path}/{quote(student_id, safe='')}"
-        try:
-            r = self.s.get(url, timeout=self.cfg.timeout)
-            r.raise_for_status()
-            data = r.json()
-            return data if isinstance(data, dict) else None
-        except (requests.RequestException, ValueError) as e:
-            # Se registra el tipo de error, sin el identificador del estudiante.
-            log.warning("consulta a /%s falló: %s", path, type(e).__name__)
-            return None
+        start = time.perf_counter()
+        # El span lleva la plantilla de la ruta, no la URL: la URL contiene el
+        # identificador del estudiante.
+        with _tracer.start_as_current_span(f"upstream.{path}", kind=SpanKind.CLIENT) as span:
+            span.set_attribute("http.request.method", "GET")
+            span.set_attribute("server.address", urlparse(self.cfg.api_url).hostname or "")
+            span.set_attribute("url.template", f"/{path}/{{student_id}}")
+            result = "error"
+            try:
+                r = self.s.get(url, timeout=self.cfg.timeout, headers=observability.inject({}))
+                span.set_attribute("http.response.status_code", r.status_code)
+                r.raise_for_status()
+                data = r.json()
+                result = "ok"
+                return data if isinstance(data, dict) else None
+            except (requests.RequestException, ValueError) as e:
+                # Se registra el tipo de error, sin el identificador del estudiante.
+                span.set_status(Status(StatusCode.ERROR, type(e).__name__))
+                log.warning("consulta a /%s falló: %s", path, type(e).__name__)
+                return None
+            finally:
+                UPSTREAM_REQUESTS.add(1, {"endpoint": path, "result": result})
+                UPSTREAM_DURATION.record(time.perf_counter() - start, {"endpoint": path})
 
     def student(self, student_id: str) -> dict[str, Any] | None:
         return self._get("students", student_id)
@@ -156,6 +191,11 @@ class OpenAIChat:
             temperature=0.2,
             max_tokens=600,
         )
+        usage = getattr(resp, "usage", None)
+        span = trace.get_current_span()
+        if usage is not None:
+            span.set_attribute("gen_ai.usage.input_tokens", getattr(usage, "prompt_tokens", 0) or 0)
+            span.set_attribute("gen_ai.usage.output_tokens", getattr(usage, "completion_tokens", 0) or 0)
         return (resp.choices[0].message.content or "").strip()
 
 
@@ -168,16 +208,39 @@ class StudentQueryAgent:
     )
 
     def answer(self, question: str, student_id: str) -> str:
-        q, sid = validate(question, student_id)
-        student = minimize(self.university.student(sid), STUDENT_FIELDS)
-        finance = minimize(self.university.finances(sid), FINANCE_FIELDS)
-        if student == "no disponible" and finance == "no disponible":
-            return self.unavailable_reply
-        try:
-            return self.llm.complete(SYSTEM_PROMPT, build_user_message(q, student, finance))
-        except Exception as e:  # el proveedor LLM puede fallar de muchas formas
-            log.error("el LLM falló: %s", type(e).__name__)
-            return self.unavailable_reply
+        with _tracer.start_as_current_span("agent.answer") as span:
+            try:
+                q, sid = validate(question, student_id)
+            except InvalidRequest:
+                QUERIES.add(1, {"result": "invalid"})
+                raise
+            span.set_attribute("aetherlynx.question.chars", len(q))
+            student = minimize(self.university.student(sid), STUDENT_FIELDS)
+            finance = minimize(self.university.finances(sid), FINANCE_FIELDS)
+            if student == "no disponible" and finance == "no disponible":
+                span.set_attribute("aetherlynx.answer", "unavailable")
+                QUERIES.add(1, {"result": "unavailable"})
+                return self.unavailable_reply
+            model = getattr(self.llm, "model", "desconocido")
+            start = time.perf_counter()
+            with _tracer.start_as_current_span("llm.complete", kind=SpanKind.CLIENT) as llm_span:
+                llm_span.set_attribute("gen_ai.system", "openai")
+                llm_span.set_attribute("gen_ai.request.model", model)
+                try:
+                    reply = self.llm.complete(SYSTEM_PROMPT, build_user_message(q, student, finance))
+                    LLM_REQUESTS.add(1, {"result": "ok", "model": model})
+                except Exception as e:  # el proveedor LLM puede fallar de muchas formas
+                    llm_span.set_status(Status(StatusCode.ERROR, type(e).__name__))
+                    LLM_REQUESTS.add(1, {"result": "error", "model": model})
+                    log.error("el LLM falló: %s", type(e).__name__)
+                    span.set_attribute("aetherlynx.answer", "unavailable")
+                    QUERIES.add(1, {"result": "unavailable"})
+                    return self.unavailable_reply
+                finally:
+                    LLM_DURATION.record(time.perf_counter() - start, {"model": model})
+            span.set_attribute("aetherlynx.answer", "answered")
+            QUERIES.add(1, {"result": "answered"})
+            return reply
 
 
 def build_agent(cfg: Config | None = None) -> StudentQueryAgent:

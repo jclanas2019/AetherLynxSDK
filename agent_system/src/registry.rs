@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::sync::RwLock;
 
 use crate::proto::{Agent, AgentPhase};
+use crate::runtime::{Observation, RecoveredAgent};
 use crate::validation::{self, ValidationError, MAX_AGENTS};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,9 +169,43 @@ impl Registry {
         self.read().values().cloned().collect()
     }
 
+    /// Reconstruye el registro con los agentes que el runtime ya tenía (por
+    /// ejemplo, Deployments existentes tras reiniciar el orquestador). Se
+    /// descartan los que no pasan la validación y los ya registrados.
+    /// Devuelve cuántos se añadieron.
+    pub fn restore(&self, recovered: Vec<RecoveredAgent>) -> usize {
+        let mut agents = self.write();
+        let mut added = 0;
+        for r in recovered {
+            let valid = validation::agent_name(&r.name).is_ok()
+                && validation::model_id(&r.model).is_ok()
+                && validation::replicas(r.desired_replicas).is_ok();
+            if !valid || agents.contains_key(&r.name) || agents.len() >= MAX_AGENTS {
+                tracing::warn!(agent = ?r.name, "agente recuperado descartado");
+                continue;
+            }
+            agents.insert(
+                r.name.clone(),
+                AgentRecord {
+                    name: r.name,
+                    model: r.model,
+                    desired_replicas: r.desired_replicas,
+                    ready_replicas: 0,
+                    phase: AgentPhase::Pending,
+                    created_at_unix: r.created_at_unix.unwrap_or_else(crate::unix_now),
+                    generation: 1,
+                    message: "recuperado del runtime".into(),
+                    deleting: false,
+                },
+            );
+            added += 1;
+        }
+        added
+    }
+
     /// Aplica una observación del runtime. Ignora observaciones obsoletas
     /// (si el estado deseado cambió mientras el runtime trabajaba).
-    pub fn observe(&self, name: &str, generation: u64, result: Result<u32, String>) {
+    pub fn observe(&self, name: &str, generation: u64, result: Result<Observation, String>) {
         let mut agents = self.write();
         let Some(rec) = agents.get_mut(name) else {
             return;
@@ -179,16 +214,16 @@ impl Registry {
             return;
         }
         match result {
-            Ok(ready) => {
-                rec.ready_replicas = ready;
+            Ok(obs) => {
+                rec.ready_replicas = obs.ready;
                 rec.message.clear();
                 if rec.deleting {
-                    if ready == 0 {
+                    if obs.converged {
                         agents.remove(name);
                     }
                     return;
                 }
-                rec.phase = if ready == rec.desired_replicas {
+                rec.phase = if obs.converged && obs.ready == rec.desired_replicas {
                     AgentPhase::Ready
                 } else {
                     AgentPhase::Scaling
@@ -205,6 +240,13 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn done(ready: u32) -> Result<Observation, String> {
+        Ok(Observation {
+            ready,
+            converged: true,
+        })
+    }
 
     #[test]
     fn create_and_duplicate() {
@@ -248,9 +290,9 @@ mod tests {
         let r = Registry::new();
         r.create("a", "m", 2).unwrap(); // gen 1
         r.scale("a", 4).unwrap(); // gen 2
-        r.observe("a", 1, Ok(2));
+        r.observe("a", 1, done(2));
         assert_eq!(r.get("a").unwrap().ready_replicas, 0);
-        r.observe("a", 2, Ok(4));
+        r.observe("a", 2, done(4));
         let a = r.get("a").unwrap();
         assert_eq!((a.ready_replicas, a.phase), (4, AgentPhase::Ready));
     }
@@ -259,15 +301,56 @@ mod tests {
     fn delete_removes_after_zero_replicas() {
         let r = Registry::new();
         r.create("a", "m", 2).unwrap();
-        r.observe("a", 1, Ok(2));
+        r.observe("a", 1, done(2));
         let d = r.delete("a").unwrap();
         assert_eq!(d.phase, AgentPhase::Terminating);
         assert!(matches!(
             r.scale("a", 3),
             Err(RegistryError::Terminating(_))
         ));
-        r.observe("a", d.generation, Ok(0));
+        r.observe("a", d.generation, done(0));
         assert!(matches!(r.get("a"), Err(RegistryError::NotFound(_))));
+    }
+
+    #[test]
+    fn ready_requires_a_converged_rollout() {
+        let r = Registry::new();
+        r.create("a", "m", 2).unwrap();
+        // Dos réplicas listas pero el rollout aún no termina (quedan pods viejos).
+        r.observe(
+            "a",
+            1,
+            Ok(Observation {
+                ready: 2,
+                converged: false,
+            }),
+        );
+        assert_eq!(r.get("a").unwrap().phase, AgentPhase::Scaling);
+        r.observe("a", 1, done(2));
+        assert_eq!(r.get("a").unwrap().phase, AgentPhase::Ready);
+    }
+
+    #[test]
+    fn restore_skips_invalid_and_duplicates() {
+        let r = Registry::new();
+        r.create("existing", "m", 1).unwrap();
+        let rec = |n: &str, m: &str, k| RecoveredAgent {
+            name: n.into(),
+            model: m.into(),
+            desired_replicas: k,
+            created_at_unix: Some(42),
+        };
+        let added = r.restore(vec![
+            rec("student-agent", "gpt-4o", 3),
+            rec("existing", "m", 9),
+            rec("Bad Name", "m", 1),
+            rec("too-many", "m", 10_000),
+        ]);
+        assert_eq!(added, 1);
+        assert_eq!(r.get("student-agent").unwrap().desired_replicas, 3);
+        assert_eq!(r.get("student-agent").unwrap().created_at_unix, 42);
+        assert_eq!(r.get("student-agent").unwrap().created_at_unix, 42);
+        assert_eq!(r.get("existing").unwrap().desired_replicas, 1);
     }
 
     #[test]

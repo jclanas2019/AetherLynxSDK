@@ -1,0 +1,222 @@
+# Orquestador AetherLynx con runtime de Kubernetes: crea un Deployment y un
+# Service por agente en este namespace.
+#
+# Requisitos previos (vea kubernetes/examples/):
+#   - Secret orchestrator-secrets con la clave api-token (>= 32 caracteres)
+#   - Secret orchestrator-tls de tipo kubernetes.io/tls (tls.crt, tls.key)
+#   - Los recursos compartidos de los agentes: agent-config.yaml, rbac.yaml
+#     y el Secret university-agent-secrets
+#
+# Una sola réplica: el reconciliador no tiene elección de líder, y dos
+# instancias con la misma --instance se pelearían por los mismos objetos.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: aetherlynx-orchestrator
+  namespace: aetherlynx
+---
+# Solo en este namespace y solo los dos tipos de objeto que el runtime
+# gestiona. Ojo: poder crear Deployments equivale a poder lanzar pods con
+# cualquier ServiceAccount y montar cualquier Secret del namespace. Por eso
+# conviene que en este namespace vivan solo AetherLynx y sus agentes. El
+# runtime, además, nunca toca objetos sin sus etiquetas de propiedad.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: aetherlynx-orchestrator
+  namespace: aetherlynx
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "create", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "create", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: aetherlynx-orchestrator
+  namespace: aetherlynx
+subjects:
+  - kind: ServiceAccount
+    name: aetherlynx-orchestrator
+    namespace: aetherlynx
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: aetherlynx-orchestrator
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: orchestrator-config
+  namespace: aetherlynx
+data:
+  # Fije la versión exacta; en producción, mejor por digest (@sha256:...).
+  AETHERLYNX_AGENT_IMAGE: "registry.example.com/aetherlynx/university-agent:0.4.0"
+  AETHERLYNX_RUNTIME: "kubernetes"
+  AETHERLYNX_INSTANCE: "default"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aetherlynx-orchestrator
+  namespace: aetherlynx
+  labels:
+    app.kubernetes.io/name: aetherlynx-orchestrator
+    app.kubernetes.io/part-of: aetherlynx
+spec:
+  replicas: 1
+  # Recreate: nunca hay dos reconciliadores vivos a la vez durante un rollout.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: aetherlynx-orchestrator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: aetherlynx-orchestrator
+        app.kubernetes.io/part-of: aetherlynx
+    spec:
+      serviceAccountName: aetherlynx-orchestrator
+      # El orquestador sí necesita su token: habla con el API de Kubernetes.
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        # Sin fsGroup, los archivos del Secret TLS (modo 0440) serían de
+        # root y el proceso no podría leer su propia clave.
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: orchestrator
+          image: registry.example.com/aetherlynx/orchestrator:0.4.0
+          imagePullPolicy: IfNotPresent
+          args: ["--listen", "0.0.0.0:50051", "--log-format", "json"]
+          ports:
+            - name: grpc
+              containerPort: 50051
+          envFrom:
+            - configMapRef:
+                name: orchestrator-config
+            # Telemetría (kubernetes/telemetry.yaml). Opcional: sin ella, el
+            # orquestador solo escribe logs locales.
+            - configMapRef:
+                name: aetherlynx-telemetry-client
+                optional: true
+          env:
+            - name: OTEL_EXPORTER_OTLP_HEADERS
+              valueFrom:
+                secretKeyRef:
+                  name: aetherlynx-telemetry-ingest
+                  key: otlp-headers
+                  optional: true
+            - name: AETHERLYNX_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: orchestrator-secrets
+                  key: api-token
+            - name: AETHERLYNX_TLS_CERT
+              value: /tls/tls.crt
+            - name: AETHERLYNX_TLS_KEY
+              value: /tls/tls.key
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+          # Sondas TCP: las de gRPC de Kubernetes no hablan TLS.
+          startupProbe:
+            tcpSocket: { port: grpc }
+            periodSeconds: 2
+            failureThreshold: 30
+          livenessProbe:
+            tcpSocket: { port: grpc }
+            periodSeconds: 20
+          volumeMounts:
+            - name: tls
+              mountPath: /tls
+              readOnly: true
+            - name: telemetry-ca
+              mountPath: /etc/aetherlynx/telemetry-ca
+              readOnly: true
+      volumes:
+        - name: tls
+          secret:
+            secretName: orchestrator-tls
+            defaultMode: 288  # 0440 en octal; en decimal para que ningún parser YAML dude
+        - name: telemetry-ca
+          configMap:
+            name: aetherlynx-telemetry-ca
+            optional: true
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aetherlynx-orchestrator
+  namespace: aetherlynx
+  labels:
+    app.kubernetes.io/name: aetherlynx-orchestrator
+spec:
+  selector:
+    app.kubernetes.io/name: aetherlynx-orchestrator
+  ports:
+    - name: grpc
+      port: 50051
+      targetPort: grpc
+---
+# Entrada: solo desde pods etiquetados como clientes del orquestador (la CLI
+# en un pod de administración, por ejemplo). El control real es el token.
+# Salida: DNS y el API server de Kubernetes (443 o 6443 según el clúster),
+# más HTTPS para la sonda de integración opcional. El API server suele tener
+# una IP privada, así que la regla no puede excluir rangos internos: en
+# producción sustitúyala por un ipBlock con la IP de su API server
+# (kubectl get endpoints kubernetes -n default).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: aetherlynx-orchestrator
+  namespace: aetherlynx
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: aetherlynx-orchestrator
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - from:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              aetherlynx.io/orchestrator-client: "true"
+      ports:
+        - port: 50051
+          protocol: TCP
+  egress:
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
+    - ports:
+        - { port: 443, protocol: TCP }
+        - { port: 6443, protocol: TCP }
+    # Telemetría hacia el colector del mismo namespace.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: aetherlynx-telemetry
+      ports:
+        - { port: 4318, protocol: TCP }

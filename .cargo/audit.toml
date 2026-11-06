@@ -1,0 +1,10 @@
+# Configuración de `cargo audit` para el workspace.
+[advisories]
+ignore = [
+    # unsafe-libyaml sin mantenimiento (aviso informativo, no vulnerabilidad).
+    # Llega por serde_yaml, que kube-client usa para leer el kubeconfig;
+    # incluso kube 3.x lo mantiene. Solo procesa el kubeconfig local del
+    # operador o la configuración del pod, no datos de terceros.
+    # Revisar al actualizar kube: quitar esta línea cuando deje de usarlo.
+    "RUSTSEC-2024-0449",
+]

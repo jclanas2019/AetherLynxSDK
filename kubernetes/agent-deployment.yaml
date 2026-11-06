@@ -1,3 +1,6 @@
+# Despliegue ESTÁTICO del agente: un número fijo de réplicas gestionado a mano.
+# Si usa el orquestador con --runtime kubernetes (orchestrator.yaml), no
+# aplique este archivo: el orquestador crea un Deployment por agente.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -5,6 +8,7 @@ metadata:
   namespace: aetherlynx
   labels:
     app.kubernetes.io/name: university-agent
+    app.kubernetes.io/component: llm-agent
     app.kubernetes.io/part-of: aetherlynx
 spec:
   replicas: 3
@@ -21,6 +25,7 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: university-agent
+        app.kubernetes.io/component: llm-agent
         app.kubernetes.io/part-of: aetherlynx
     spec:
       serviceAccountName: university-agent
@@ -42,7 +47,7 @@ spec:
       containers:
         - name: university-agent
           # Fije la versión exacta; en producción, mejor por digest (@sha256:...).
-          image: registry.example.com/aetherlynx/university-agent:0.2.0
+          image: registry.example.com/aetherlynx/university-agent:0.4.0
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
@@ -52,6 +57,20 @@ spec:
                 name: university-agent-config
             - secretRef:
                 name: university-agent-secrets
+            # Telemetría (kubernetes/telemetry.yaml), opcional como en los
+            # agentes que crea el orquestador.
+            - configMapRef:
+                name: aetherlynx-telemetry-client
+                optional: true
+          env:
+            - name: AETHERLYNX_AGENT_NAME
+              value: university-agent
+            - name: OTEL_EXPORTER_OTLP_HEADERS
+              valueFrom:
+                secretKeyRef:
+                  name: aetherlynx-telemetry-ingest
+                  key: otlp-headers
+                  optional: true
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -78,10 +97,17 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            - name: telemetry-ca
+              mountPath: /etc/aetherlynx/telemetry-ca
+              readOnly: true
       volumes:
         - name: tmp
           emptyDir:
             sizeLimit: 64Mi
+        - name: telemetry-ca
+          configMap:
+            name: aetherlynx-telemetry-ca
+            optional: true
 ---
 apiVersion: v1
 kind: Service

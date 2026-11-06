@@ -100,7 +100,7 @@ def test_client_errors_return_none_and_quote_ids(monkeypatch):
     client = sqa.UniversityClient(cfg)
     seen = {}
 
-    def fake_get(url, timeout):
+    def fake_get(url, timeout, headers=None):
         seen["url"], seen["timeout"] = url, timeout
         raise requests.ConnectionError("boom")
 

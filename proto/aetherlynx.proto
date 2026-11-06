@@ -65,4 +65,6 @@ message OrchestratorStatus {
   bool integration_enabled = 8;
   bool integration_healthy = 9;
   string integration_detail = 10;
+  // "simulated" o "kubernetes".
+  string runtime = 11;
 }

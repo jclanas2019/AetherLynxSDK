@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>AetherLynx Telemetría</title>
+<link rel="stylesheet" href="/app.css">
+<script src="/app.js" defer></script>
+</head>
+<body>
+<div id="login" class="login" hidden>
+  <form id="login-form" class="login-card" autocomplete="off">
+    <p class="eyebrow">AetherLynx</p>
+    <h1>Telemetría</h1>
+    <p class="muted">Introduzca el token de consulta del colector (<code>AETHERLYNX_TELEMETRY_TOKEN</code>). Se guarda solo en esta pestaña.</p>
+    <label for="token">Token de consulta</label>
+    <input id="token" type="password" required minlength="1" spellcheck="false">
+    <p id="login-error" class="error" hidden></p>
+    <button type="submit">Entrar</button>
+  </form>
+</div>
+
+<div id="app" class="app" hidden>
+  <header class="top">
+    <div class="brand">
+      <span class="mark" aria-hidden="true"></span>
+      <span class="brand-name">AetherLynx</span>
+      <span class="brand-sub">Telemetría</span>
+    </div>
+    <nav class="tabs" aria-label="Secciones">
+      <a href="#resumen" data-tab="resumen">Resumen</a>
+      <a href="#trazas" data-tab="trazas">Trazas</a>
+      <a href="#metricas" data-tab="metricas">Métricas</a>
+      <a href="#logs" data-tab="logs">Logs</a>
+    </nav>
+    <div class="controls">
+      <label class="sr" for="window">Ventana</label>
+      <select id="window" title="Ventana de tiempo">
+        <option value="15m">15 min</option>
+        <option value="1h" selected>1 h</option>
+        <option value="6h">6 h</option>
+        <option value="24h">24 h</option>
+      </select>
+      <label class="toggle" title="Actualizar cada 15 s"><input id="auto" type="checkbox" checked> Auto</label>
+      <button id="refresh" class="ghost" type="button">Actualizar</button>
+      <button id="logout" class="ghost" type="button">Salir</button>
+    </div>
+  </header>
+  <p id="status-line" class="status-line" aria-live="polite"></p>
+  <main id="view" class="view"></main>
+</div>
+</body>
+</html>

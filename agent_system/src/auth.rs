@@ -46,10 +46,15 @@ impl Interceptor for TokenAuth {
             .get("authorization")
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.strip_prefix("Bearer "))
-            .ok_or_else(|| Status::unauthenticated("falta el token de acceso"))?;
+            .ok_or_else(|| {
+                crate::telemetry::metrics().auth_rejected.add(1, &[]);
+                Status::unauthenticated("falta el token de acceso")
+            })?;
         if bool::from(presented.as_bytes().ct_eq(expected)) {
             Ok(req)
         } else {
+            crate::telemetry::metrics().auth_rejected.add(1, &[]);
+            tracing::warn!("petición gRPC rechazada: token inválido");
             Err(Status::unauthenticated("token de acceso inválido"))
         }
     }

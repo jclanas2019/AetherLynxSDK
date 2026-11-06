@@ -1,6 +1,6 @@
 [package]
 name = "pam_ipa_project"
-version = "0.2.0"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.88"
 description = "Autenticación (PAM) y autorización por roles (IPA) de AetherLynx, con bindings para Python"

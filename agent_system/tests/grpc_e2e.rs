@@ -75,7 +75,7 @@ async fn full_lifecycle() {
     .await
     .unwrap();
     for _ in 0..3 {
-        reconciler.reconcile_once();
+        reconciler.reconcile_once().await;
     }
     let a = c
         .get_agent(authed(GetAgentRequest {
@@ -99,7 +99,7 @@ async fn full_lifecycle() {
     .await
     .unwrap();
     for _ in 0..3 {
-        reconciler.reconcile_once();
+        reconciler.reconcile_once().await;
     }
     let l = c
         .list_agents(authed(ListAgentsRequest {}))

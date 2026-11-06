@@ -18,6 +18,9 @@ prost.workspace = true
 tonic-prost.workspace = true
 clap.workspace = true
 serde_json.workspace = true
+getrandom = "0.3"
+# Cliente HTTP del colector de telemetría (subcomando `telemetry`).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 
 [build-dependencies]
 tonic-prost-build.workspace = true

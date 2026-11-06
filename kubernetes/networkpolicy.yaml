@@ -1,16 +1,19 @@
 # Entrada: solo desde pods etiquetados como clientes del agente (p. ej. el
 # backend del portal). Ojo: cualquiera que pueda crear pods puede poner esa
 # etiqueta; el control real es el token AETHERLYNX_AGENT_TOKEN.
-# Salida: DNS y HTTPS hacia Internet (API de la universidad y proveedor LLM).
+# Salida: DNS, HTTPS hacia Internet (API de la universidad y proveedor LLM) y
+# OTLP hacia el colector de telemetría del namespace.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: university-agent
   namespace: aetherlynx
 spec:
+  # Cubre a los agentes del Deployment estático y a los que crea el
+  # orquestador: todos llevan app.kubernetes.io/component=llm-agent.
   podSelector:
     matchLabels:
-      app.kubernetes.io/name: university-agent
+      app.kubernetes.io/component: llm-agent
   policyTypes: ["Ingress", "Egress"]
   ingress:
     - from:
@@ -30,6 +33,14 @@ spec:
       ports:
         - { port: 53, protocol: UDP }
         - { port: 53, protocol: TCP }
+    # El ipBlock de abajo excluye los rangos privados, así que el colector
+    # (dentro del clúster) necesita su propia regla.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: aetherlynx-telemetry
+      ports:
+        - { port: 4318, protocol: TCP }
     # HTTPS solo hacia fuera del clúster: se excluyen rangos privados,
     # CGNAT y link-local (incluye el endpoint de metadatos 169.254.169.254).
     # Si el API de la universidad es interno, añada aquí su CIDR concreto.

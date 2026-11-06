@@ -1,5 +1,5 @@
 # Imagen del agente de consultas de estudiantes.
-#   docker build -t <registro>/aetherlynx/university-agent:0.2.0 agents/
+#   docker build -t <registro>/aetherlynx/university-agent:0.4.0 agents/
 FROM python:3.12-slim-bookworm
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -13,7 +13,7 @@ RUN useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin agent
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
-COPY student_queries_agent.py service.py ./
+COPY observability.py student_queries_agent.py service.py ./
 
 USER 10001
 EXPOSE 5000
