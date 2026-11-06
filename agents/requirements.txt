@@ -1,6 +1,6 @@
 # Rangos acotados: actualizaciones de parche sí, cambios de versión mayor no.
 openai>=1.40,<2
-requests>=2.32,<3
+requests>=2.34.2,<3
 fastapi>=0.110,<1
 uvicorn[standard]>=0.29,<1
 pydantic>=2.6,<3
